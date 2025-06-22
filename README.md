@@ -16,15 +16,6 @@
 - **收入稳定性分析**：评估收入流的稳定性和可预测性
 - **资产证券化结构设计**：设计优先级、中间级和次级分层结构
 
-## 项目结构
-
-- `main.py` - 主程序入口
-- `low_altitude_economy_part1.py` - 基础设施类型定义、风险评估和现金流模拟
-- `low_altitude_economy_part2.py` - 压力测试、收入稳定性评估和数据处理
-- `low_altitude_economy_part3.py` - CIR、Hull-White和OAS模型实现
-- `low_altitude_economy_part4.py` - 蒙特卡洛模拟和资产证券化分析
-- `low_altitude_economy_part5.py` - 资产证券化定价、加权平均结果和相关性分析
-
 ## 安装要求
 
 ```
