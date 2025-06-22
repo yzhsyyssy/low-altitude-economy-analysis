@@ -1,0 +1,1810 @@
+# 导入必要的库
+import pandas as pd
+import numpy as np
+from enum import Enum
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import StandardScaler
+from statsmodels.tsa.arima.model import ARIMA
+from scipy.optimize import minimize
+from scipy.stats import norm
+import matplotlib.pyplot as plt
+import matplotlib
+import os
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+
+# 配置matplotlib支持中文
+matplotlib.rcParams['font.sans-serif'] = ['SimHei']
+matplotlib.rcParams['axes.unicode_minus'] = False
+
+
+# 定义基础设施和收入类型枚举
+class InfrastructureType(Enum):
+    VERTIPORT = "vertiport"  # 垂直起降平台
+    CONTROL_CENTER = "control_center"  # 控制中心
+    GROUND_STATION = "ground_station"  # 地面站
+    INFO_NETWORK = "info_network"  # 信息网络设施
+    AIRPORT = "airport"  # 通用机场
+    WEATHER_STATION = "weather_station"  # 气象站
+    MICRO_SERVICE = "micro_service"  # 小微服务站
+    DIGITAL_PLATFORM = "digital_platform"  # 数字化管理服务平台
+    DRONE_HANGAR = "drone_hangar"  # 无人机机库
+    CHARGING_STATION = "charging_station"  # 充电站
+    MAINTENANCE_WORKSHOP = "maintenance_workshop"  # 维护和修理车间
+    FUEL_DEPOT = "fuel_depot"  # 燃料库
+    NAVIGATION_TOWER = "navigation_tower"  # 导航和通信塔
+    SECURITY_SYSTEM = "security_system"  # 安全和监控系统
+    TRAINING_CENTER = "training_center"  # 培训中心
+    FLIGHT_MANAGEMENT_SOFTWARE = "flight_management_software"  # 飞行管理软件
+    DRONE_FLEET_MANAGEMENT_PLATFORM = "drone_fleet_management_platform"  # 无人机群管理平台
+    DATA_ANALYTICS_PLATFORM = "data_analytics_platform"  # 数据分析平台
+    CYBERSECURITY_SYSTEM = "cyberscurity_system"  # 网络安全系统
+    LICENSE_DATABASE = "license_database"  # 许可和认证数据库
+    COMPLIANCE_MONITORING_TOOLS = "compliance_monitoring_tools"  # 合规监控工具
+
+
+class RevenueType(Enum):
+    LANDING_PARKING = "landing_parking"  # 起降与停场服务收费
+    FUEL_SERVICE = "fuel_service"  # 航空燃油加注服务
+    SYSTEM_LICENSE = "system_license"  # 数字化管理系统授权
+    WEATHER_DATA = "weather_data"  # 气象数据服务
+    EQUIPMENT_LEASE = "equipment_lease"  # 设备长期租赁
+    MAINTENANCE = "maintenance"  # 维修服务
+    ADVERTISING = "advertising"  # 广告收入
+    RETAIL = "retail"  # 零售收入
+    TOURISM = "tourism"  # 旅游服务
+    LOGISTICS = "logistics"  # 物流服务
+    DATA_SERVICE = "data_service"  # 临时数据服务
+    EMERGENCY = "emergency"  # 应急服务
+    PUBLIC_SERVICE = "public_service"  # 公共管理服务
+
+
+@dataclass
+class RevenueStream:
+    revenue_type: RevenueType  # 收入类型
+    is_stable: bool  # 是否为稳定现金流
+    base_amount: float  # 年基础金额，单位：万元人民币
+    contract_period: Optional[int] = None  # 合同期限，单位为月
+    renewal_rate: float = 0.9  # 续约率，默认为0.9
+    growth_rate: float = 0.15  # 年增长率，默认为15%
+    seasonality: Dict[int, float] = field(default_factory=lambda: {i: 1.0 for i in range(1, 13)})  # 季节性因子，默认无波动
+
+    def __post_init__(self):
+        if self.base_amount <= 0:
+            raise ValueError("基础金额必须为正数")
+        if self.is_stable and self.contract_period is None:
+            raise ValueError("稳定收入需指定合同期限")
+        if not 0 <= self.renewal_rate <= 1 or not 0 <= self.growth_rate <= 1:
+            raise ValueError("续约率和增长率必须在0-1之间")
+
+
+@dataclass
+class InfrastructureRevenue:
+    asset_type: InfrastructureType  # 基础设施类型
+    revenue_streams: List[RevenueStream] = field(default_factory=list)  # 收入流列表
+
+    @classmethod
+    def create_default_revenue(cls, asset_type: InfrastructureType) -> 'InfrastructureRevenue':
+        streams = []  # 初始化收入流列表
+
+        # VERTIPORT（垂直起降平台）
+        if asset_type == InfrastructureType.VERTIPORT:
+            streams.extend([
+                RevenueStream(RevenueType.LANDING_PARKING, True, 2100.0, 36, 0.95, 0.15,
+                              {1: 0.8, 2: 0.8, 3: 0.9, 4: 1.0, 5: 1.1, 6: 1.2, 7: 1.2, 8: 1.2, 9: 1.1, 10: 1.0, 11: 0.9,
+                               12: 0.8}),  # 起降服务，$300万转为2100万元，36个月合同，参考FAA小型机场
+                RevenueStream(RevenueType.FUEL_SERVICE, True, 700.0, 24, 0.92, 0.15),
+                # 燃油服务，$100万转为700万元，24个月合同，参考FAA小型机场
+                RevenueStream(RevenueType.ADVERTISING, False, 350.0, growth_rate=0.15,
+                              seasonality={1: 0.8, 2: 0.8, 3: 0.9, 4: 1.0, 5: 1.1, 6: 1.2, 7: 1.2, 8: 1.2, 9: 1.1,
+                                           10: 1.0, 11: 0.9, 12: 0.8}),  # 广告收入，$50万转为350万元，参考机场广告收入
+                RevenueStream(RevenueType.RETAIL, False, 350.0, growth_rate=0.15)  # 零售收入，$50万转为350万元，参考机场零售收入
+            ])
+
+        # CONTROL_CENTER（控制中心）
+        elif asset_type == InfrastructureType.CONTROL_CENTER:
+            streams.extend([
+                RevenueStream(RevenueType.SYSTEM_LICENSE, True, 3500.0, 24, 0.95, 0.15),
+                # 系统授权，$500万转为3500万元，24个月合同，参考SaaS公司
+                RevenueStream(RevenueType.DATA_SERVICE, False, 700.0, growth_rate=0.15)  # 临时数据服务，$100万转为700万元，参考数据服务行业
+            ])
+
+        # GROUND_STATION（地面站）
+        elif asset_type == InfrastructureType.GROUND_STATION:
+            streams.extend([
+                RevenueStream(RevenueType.EQUIPMENT_LEASE, True, 350.0, 36, 0.95, 0.15),
+                # 设备租赁，$50万转为350万元，36个月合同，参考通信服务提供商
+                RevenueStream(RevenueType.DATA_SERVICE, False, 70.0, growth_rate=0.15)  # 临时数据服务，$10万转为70万元，参考通信服务
+            ])
+
+        # INFO_NETWORK（信息网络设施）
+        elif asset_type == InfrastructureType.INFO_NETWORK:
+            streams.extend([
+                RevenueStream(RevenueType.SYSTEM_LICENSE, True, 350.0, 24, 0.95, 0.15),
+                # 系统授权，$50万转为350万元，24个月合同，参考通信网络提供商
+                RevenueStream(RevenueType.DATA_SERVICE, False, 70.0, growth_rate=0.15)  # 临时数据服务，$10万转为70万元，参考通信网络服务
+            ])
+
+        # AIRPORT（通用机场）
+        elif asset_type == InfrastructureType.AIRPORT:
+            streams.extend([
+                RevenueStream(RevenueType.LANDING_PARKING, True, 3500.0, 36, 0.95, 0.15,
+                              {1: 0.8, 2: 0.8, 3: 0.9, 4: 1.0, 5: 1.1, 6: 1.2, 7: 1.2, 8: 1.2, 9: 1.1, 10: 1.0, 11: 0.9,
+                               12: 0.8}),  # 起降服务，$500万转为3500万元，36个月合同，参考传统机场
+                RevenueStream(RevenueType.FUEL_SERVICE, True, 1400.0, 24, 0.92, 0.15),
+                # 燃油服务，$200万转为1400万元，24个月合同，参考传统机场
+                RevenueStream(RevenueType.EQUIPMENT_LEASE, True, 700.0, 36, 0.95, 0.15),
+                # 设备租赁，$100万转为700万元，36个月合同，参考传统机场
+                RevenueStream(RevenueType.ADVERTISING, False, 700.0, growth_rate=0.15,
+                              seasonality={1: 0.8, 2: 0.8, 3: 0.9, 4: 1.0, 5: 1.1, 6: 1.2, 7: 1.2, 8: 1.2, 9: 1.1,
+                                           10: 1.0, 11: 0.9, 12: 0.8}),  # 广告收入，$100万转为700万元，参考传统机场
+                RevenueStream(RevenueType.RETAIL, False, 700.0, growth_rate=0.15)  # 零售收入，$100万转为700万元，参考传统机场
+            ])
+
+        # WEATHER_STATION（气象站）
+        elif asset_type == InfrastructureType.WEATHER_STATION:
+            streams.extend([
+                RevenueStream(RevenueType.WEATHER_DATA, True, 700.0, 12, 0.95, 0.15),
+                # 气象数据服务，$100万转为700万元，12个月合同，参考AccuWeather
+            ])
+
+        # MICRO_SERVICE（小微服务站）
+        elif asset_type == InfrastructureType.MICRO_SERVICE:
+            streams.extend([
+                RevenueStream(RevenueType.FUEL_SERVICE, True, 1050.0, 24, 0.92, 0.15),
+                # 燃油服务，$150万转为1050万元，24个月合同，参考小型加油站
+                RevenueStream(RevenueType.MAINTENANCE, False, 350.0, growth_rate=0.15),  # 维修服务，$50万转为350万元，参考小型服务站
+                RevenueStream(RevenueType.RETAIL, False, 350.0, growth_rate=0.15)  # 零售收入，$50万转为350万元，参考小型服务站
+            ])
+
+        # DIGITAL_PLATFORM（数字化管理服务平台）
+        elif asset_type == InfrastructureType.DIGITAL_PLATFORM:
+            streams.extend([
+                RevenueStream(RevenueType.SYSTEM_LICENSE, True, 3500.0, 24, 0.95, 0.15),
+                # 系统授权，$500万转为3500万元，24个月合同，参考SaaS公司
+                RevenueStream(RevenueType.DATA_SERVICE, False, 700.0, growth_rate=0.15)  # 临时数据服务，$100万转为700万元，参考数据服务行业
+            ])
+
+        # DRONE_HANGAR（无人机机库）
+        elif asset_type == InfrastructureType.DRONE_HANGAR:
+            streams.extend([
+                RevenueStream(RevenueType.EQUIPMENT_LEASE, True, 420.0, 36, 0.95, 0.15),
+                # 设备租赁，$60万转为420万元，36个月合同，参考飞机机库
+                RevenueStream(RevenueType.MAINTENANCE, False, 140.0, growth_rate=0.15)  # 维修服务，$20万转为140万元，参考维护服务
+            ])
+
+        # CHARGING_STATION（充电站）
+        elif asset_type == InfrastructureType.CHARGING_STATION:
+            streams.extend([
+                RevenueStream(RevenueType.FUEL_SERVICE, True, 52.5, 24, 0.92, 0.15),
+                # 充电费用，$7.5万转为52.5万元，24个月合同，参考电动车充电站
+            ])
+
+        # MAINTENANCE_WORKSHOP（维护和修理车间）
+        elif asset_type == InfrastructureType.MAINTENANCE_WORKSHOP:
+            streams.extend([
+                RevenueStream(RevenueType.MAINTENANCE, False, 350.0, growth_rate=0.15)  # 维修服务，$50万转为350万元，参考汽车维修店
+            ])
+
+        # FUEL_DEPOT（燃料库）
+        elif asset_type == InfrastructureType.FUEL_DEPOT:
+            streams.extend([
+                RevenueStream(RevenueType.FUEL_SERVICE, True, 1400.0, 24, 0.92, 0.15),
+                # 燃油服务，$200万转为1400万元，24个月合同，参考燃料配送中心
+            ])
+
+        # NAVIGATION_TOWER（导航和通信塔）
+        elif asset_type == InfrastructureType.NAVIGATION_TOWER:
+            streams.extend([
+                RevenueStream(RevenueType.EQUIPMENT_LEASE, True, 350.0, 36, 0.95, 0.15),
+                # 服务费，$50万转为350万元，36个月合同，参考通信塔服务
+            ])
+
+        # SECURITY_SYSTEM（安全和监控系统）
+        elif asset_type == InfrastructureType.SECURITY_SYSTEM:
+            streams.extend([
+                RevenueStream(RevenueType.SYSTEM_LICENSE, True, 350.0, 24, 0.95, 0.15),
+                # 订阅费用，$50万转为350万元，24个月合同，参考安全服务提供商
+            ])
+
+        # TRAINING_CENTER（培训中心）
+        elif asset_type == InfrastructureType.TRAINING_CENTER:
+            streams.extend([
+                RevenueStream(RevenueType.PUBLIC_SERVICE, True, 700.0, 12, 0.95, 0.15),
+                # 培训费用，$100万转为700万元，12个月合同，参考飞行学校
+            ])
+
+        # FLIGHT_MANAGEMENT_SOFTWARE（飞行管理软件）
+        elif asset_type == InfrastructureType.FLIGHT_MANAGEMENT_SOFTWARE:
+            streams.extend([
+                RevenueStream(RevenueType.SYSTEM_LICENSE, True, 3500.0, 24, 0.95, 0.15),
+                # 系统授权，$500万转为3500万元，24个月合同，参考软件公司
+            ])
+
+        # DRONE_FLEET_MANAGEMENT_PLATFORM（无人机群管理平台）
+        elif asset_type == InfrastructureType.DRONE_FLEET_MANAGEMENT_PLATFORM:
+            streams.extend([
+                RevenueStream(RevenueType.SYSTEM_LICENSE, True, 3500.0, 24, 0.95, 0.15),
+                # 系统授权，$500万转为3500万元，24个月合同，参考软件公司
+            ])
+
+        # DATA_ANALYTICS_PLATFORM（数据分析平台）
+        elif asset_type == InfrastructureType.DATA_ANALYTICS_PLATFORM:
+            streams.extend([
+                RevenueStream(RevenueType.SYSTEM_LICENSE, True, 1400.0, 24, 0.95, 0.15),
+                # 订阅费用，$200万转为1400万元，24个月合同，参考数据分析公司
+                RevenueStream(RevenueType.DATA_SERVICE, False, 350.0, growth_rate=0.15)  # 数据销售，$50万转为350万元，参考项目数据销售
+            ])
+
+        # CYBERSECURITY_SYSTEM（网络安全系统）
+        elif asset_type == InfrastructureType.CYBERSECURITY_SYSTEM:
+            streams.extend([
+                RevenueStream(RevenueType.SYSTEM_LICENSE, True, 700.0, 24, 0.95, 0.15),
+                # 订阅费用，$100万转为700万元，24个月合同，参考网络安全公司
+            ])
+
+        # LICENSE_DATABASE（许可和认证数据库）
+        elif asset_type == InfrastructureType.LICENSE_DATABASE:
+            streams.extend([
+                RevenueStream(RevenueType.SYSTEM_LICENSE, True, 350.0, 12, 0.95, 0.15),
+                # 注册费用，$50万转为350万元，12个月合同，参考专业协会
+            ])
+
+        # COMPLIANCE_MONITORING_TOOLS（合规监控工具）
+        elif asset_type == InfrastructureType.COMPLIANCE_MONITORING_TOOLS:
+            streams.extend([
+                RevenueStream(RevenueType.SYSTEM_LICENSE, True, 700.0, 24, 0.95, 0.15),
+                # 系统授权，$100万转为700万元，24个月合同，参考合规软件公司
+            ])
+
+        return cls(asset_type=asset_type, revenue_streams=streams)  # 返回基础设施收入实例
+# 在 InfrastructureRevenue 类后添加收入稳定性评估
+# 添加收入稳定性评估方法（移到类内部）
+    def get_revenue_stability_metrics(self, months: int = 24) -> Dict[str, float]:
+        """评估收入稳定性指标"""
+        cash_flows = simulate_cash_flows(self, simulations=1000)
+        monthly_revenues = cash_flows.mean(axis=1)[:months]
+        # 基于现金流波动计算稳定性比率
+        stability_ratios = np.ones(months)  # 初始为1
+        for t in range(1, months):
+            growth_rate = monthly_revenues[t] / monthly_revenues[t - 1] if monthly_revenues[t - 1] > 0 else 1
+            stability_ratios[t] = 1 / (1 + abs(np.log(growth_rate)))  # 稳定性随增长率波动降低
+        avg_stability = np.mean(stability_ratios)
+        std_stability = np.std(stability_ratios) if months > 1 else 0.0
+        revenue_growth = (monthly_revenues[-1] / monthly_revenues[0] - 1) if monthly_revenues[0] > 0 else 0
+        log_returns = np.diff(np.log(monthly_revenues))
+        volatility = np.std(log_returns) * np.sqrt(12) if len(log_returns) > 0 else 0
+        return {
+            'average_stability': avg_stability,
+            'stability_std': std_stability,
+            'revenue_growth': revenue_growth,
+            'volatility': volatility
+        }
+@dataclass
+class LowAltitudeInfrastructureAsset:
+    """占位符类，代表基础设施资产"""
+    location_tier: int = 1  # 城市等级（1-3）
+
+class RiskAssessmentSystem:
+    """风险评估系统"""
+    def __init__(self, asset: LowAltitudeInfrastructureAsset, revenue: InfrastructureRevenue):
+        self.asset = asset
+        self.revenue = revenue
+        self.risk_weights = {
+            'market_risk': 0.30,
+            'credit_risk': 0.20,
+            'operational_risk': 0.25,
+            'policy_risk': 0.15,
+            'liquidity_risk': 0.10,
+            'weather_risk': 0.00
+        }
+
+    def calculate_market_risk(self) -> float:
+        monthly_revenues = simulate_cash_flows(self.revenue, 1000).mean(axis=1)[:12]
+        revenue_std = np.std(monthly_revenues)
+        revenue_mean = np.mean(monthly_revenues)
+        return min(revenue_std / (revenue_mean + 1e-10), 1.0)
+
+    def calculate_credit_risk(self) -> float:
+        stable_ratio = sum(1 for stream in self.revenue.revenue_streams if stream.is_stable) / len(self.revenue.revenue_streams)
+        return 1 - stable_ratio
+
+    def calculate_operational_risk(self) -> float:
+        location_risk = self.asset.location_tier / 5
+        type_risk = 0.3
+        return (location_risk + type_risk) / 2
+
+    def calculate_policy_risk(self) -> float:
+        base_policy_risk = 0.2
+        location_adjustment = self.asset.location_tier / 10
+        return min(base_policy_risk + location_adjustment, 1.0)
+
+    def calculate_liquidity_risk(self) -> float:
+        monthly_revenues = simulate_cash_flows(self.revenue, 1000).mean(axis=1)[:12]
+        liquidity_ratio = np.min(monthly_revenues) / (np.mean(monthly_revenues) + 1e-10)
+        return 1 - liquidity_ratio
+
+    def get_overall_risk_assessment(self) -> Dict[str, float]:
+        risk_scores = {
+            'market_risk': self.calculate_market_risk(),
+            'credit_risk': self.calculate_credit_risk(),
+            'operational_risk': self.calculate_operational_risk(),
+            'policy_risk': self.calculate_policy_risk(),
+            'liquidity_risk': self.calculate_liquidity_risk()
+        }
+        weighted_score = sum(score * self.risk_weights[risk_type] for risk_type, score in risk_scores.items())
+        risk_level = '高' if weighted_score > 0.7 else '中' if weighted_score > 0.4 else '低'
+        return {
+            'overall_risk_score': weighted_score,
+            'risk_level': risk_level,
+            'detailed_scores': risk_scores
+        }
+def simulate_cash_flows(revenue: InfrastructureRevenue, simulations: int = 1000) -> np.ndarray:
+    """模拟现金流（增强波动性）"""
+    base_cash_flows = revenue.generate_cash_flows(simulations=simulations)
+    # 引入更高波动性
+    noise = np.random.normal(0, 0.2, base_cash_flows.shape)  # 增加 20% 波动
+    return base_cash_flows * (1 + noise)
+
+class CashflowStressTest:
+    """现金流压力测试"""
+    def __init__(self, revenue: InfrastructureRevenue, risk_system: RiskAssessmentSystem):
+        self.revenue = revenue
+        self.risk_system = risk_system
+
+    def run_stress_test(self, scenarios: int = 1000, horizon: int = 24) -> Dict[str, float]:
+        cash_flows = simulate_cash_flows(self.revenue, scenarios).mean(axis=1)[:horizon]
+        scenarios_config = {
+            'severe_downturn': {'revenue_shock': -0.50, 'recovery_period': 12, 'probability': 0.05},  # 更严重的冲击
+            'moderate_stress': {'revenue_shock': -0.30, 'recovery_period': 6, 'probability': 0.15},
+            'mild_stress': {'revenue_shock': -0.15, 'recovery_period': 3, 'probability': 0.30},
+            'base_case': {'revenue_shock': 0.0, 'recovery_period': 0, 'probability': 0.50}
+        }
+        results = []
+        for _ in range(scenarios):
+            scenario = np.random.choice(list(scenarios_config.keys()), p=[v['probability'] for v in scenarios_config.values()])
+            shock = scenarios_config[scenario]['revenue_shock']
+            recovery = min(scenarios_config[scenario]['recovery_period'], horizon)
+            stressed_cashflows = cash_flows.copy()
+            for t in range(recovery):
+                stressed_cashflows[t] *= (1 + shock)
+            pv = np.sum(stressed_cashflows)
+            results.append(pv)
+        results_array = np.array(results)
+        print(f"压力测试结果分布 - 最小值: {results_array.min():.2f}, 最大值: {results_array.max():.2f}")  # 调试日志
+        return {
+            'expected_loss': np.mean(results_array),
+            'var_95': np.percentile(results_array, 95),
+            'var_99': np.percentile(results_array, 99),
+            'max_drawdown': np.min(results_array),
+            'recovery_probability': np.mean(results_array > 0)
+        }
+
+
+# 数据文件路径
+file_paths = {
+    "CPI": r"D:\桌面\CPI月度数据.xlsx",
+    "GDP": r"D:\桌面\GDP增长率年度数据.xlsx",
+    "MONEY": r"D:\桌面\货币供应量月度数据.xlsx",
+    "UNEMPLOYMENT": r"D:\桌面\失业率月度数据.xlsx",
+    "SHIBOR": r"D:\桌面\SHIBOR2017-2024.xlsx",
+    "YIELD": r"D:\桌面\财政部-中国国债收益率曲线历史数据2017年-2024年.xlsx",
+    "HOUSING": r"D:\桌面\房价指数年度数据.xlsx"
+}
+
+# 统一预测时间
+FORECAST_YEARS = 10
+MONTHS_PER_YEAR = 12
+DAYS_PER_YEAR = 252
+FORECAST_MONTHS = FORECAST_YEARS * MONTHS_PER_YEAR
+FORECAST_DAYS = FORECAST_YEARS * DAYS_PER_YEAR
+
+# 图像输出目录
+OUTPUT_DIR = r"D:\桌面\111"
+if not os.path.exists(OUTPUT_DIR):
+    os.makedirs(OUTPUT_DIR)
+
+
+# 读取指标纵向、时间横向的表格
+def load_indicator_vertical(file_path, time_format='%Y-%m'):
+    try:
+        df = pd.read_excel(file_path, skiprows=2, index_col=0)
+        df = df.loc[:, ~df.columns.str.contains('Unnamed')]
+        print(f"加载 {file_path} 原始列名：{list(df.columns)}")
+
+        original_cols = df.columns
+        if time_format == '%Y-%m':
+            time_cols = [col.replace('年', '-').replace('月', '') for col in original_cols]
+            time_cols = [f"{col[:4]}-{col[5:].zfill(2)}" if len(col) > 4 else f"{col}-01" for col in time_cols]
+            time_series = pd.to_datetime(time_cols, format='%Y-%m', errors='coerce')
+        elif time_format == '%Y':
+            time_cols = [col.replace('年', '') for col in original_cols]
+            time_series = pd.to_datetime(time_cols, format='%Y', errors='coerce')
+        else:
+            raise ValueError(f"不支持的时间格式：{time_format}")
+
+        print(f"处理后的时间列：{time_cols}")
+        print(f"时间转换结果：{time_series}")
+        valid_time_cols = [col for col, ts in zip(original_cols, time_series) if pd.notna(ts)]
+        if len(valid_time_cols) == 0:
+            raise ValueError(f"没有找到有效的时间列，请检查时间格式！预期格式：{time_format}")
+
+        df = df[valid_time_cols]
+        df.columns = time_series[[pd.notna(ts) for ts in time_series]]
+        df = df.reset_index().melt(id_vars='指标', var_name='时间', value_name='值')
+        df = df.dropna(subset=['时间', '值'])
+        df['时间'] = pd.to_datetime(df['时间'])
+        df = df.sort_values('时间')
+        print(f"加载 {file_path} 成功！预览：\n{df.head(10)}")
+        return df
+    except Exception as e:
+        print(f"加载 {file_path} 失败：{e}")
+        return None
+
+
+# 读取时间纵向、指标横向的表格
+def load_time_vertical(file_path):
+    try:
+        excel_file = pd.ExcelFile(file_path)
+        all_sheets = []
+        for sheet_name in excel_file.sheet_names:
+            df = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+            print(f"处理Sheet: {sheet_name}")
+
+            header_row = df.index[df.iloc[:, 0].astype(str).str.contains('日期|Date', case=False, na=False)].tolist()
+            if not header_row:
+                print(f"Sheet {sheet_name} 中未找到表头 '日期' 或 'Date'，使用第0行作为表头")
+                header_idx = 0
+            else:
+                header_idx = header_row[0]
+            print(f"识别表头行索引: {header_idx}")
+
+            df.columns = df.iloc[header_idx]
+            data_df = df.iloc[header_idx + 1:].reset_index(drop=True)
+            data_df = data_df[~data_df['日期'].astype(str).str.contains('数据来源|www.chinamoney.com.cn', na=False)]
+            data_df['时间'] = pd.to_datetime(data_df['日期'], errors='coerce')
+            data_df = data_df.dropna(subset=['时间'])
+
+            value_vars = [col for col in data_df.columns if col not in ['日期', '时间']]
+            print(f"定义的 value_vars: {value_vars}")
+
+            data_df = data_df.melt(id_vars='时间', value_vars=value_vars, var_name='指标', value_name='值')
+            data_df['指标'] = data_df['指标'].astype(str).str.strip()
+            data_df = data_df.dropna(subset=['值'])
+            data_df = data_df.sort_values('时间')
+
+            all_sheets.append(data_df)
+
+        if not all_sheets:
+            raise ValueError(f"加载 {file_path} 失败：没有找到有效的数据表")
+
+        combined_df = pd.concat(all_sheets, ignore_index=True)
+        combined_df['值'] = pd.to_numeric(combined_df['值'], errors='coerce')
+        if combined_df['值'].isna().all():
+            raise ValueError(f"加载 {file_path} 失败：所有值均为 nan，请检查数据内容")
+
+        # 插值和填充，确保数据不包含 nan
+        combined_df = combined_df.set_index('时间').groupby('指标')['值'].resample('D').mean().interpolate(method='linear').ffill().bfill().reset_index()
+        if combined_df['值'].isna().any():
+            # 如果仍有 nan，可能是数据完全缺失，使用默认值填充
+            combined_df['值'] = combined_df['值'].fillna(0.01)  # 默认值为 1%
+            print(f"警告：{file_path} 数据中仍有 nan，已填充为默认值 0.01")
+
+        print(f"合并后 指标列唯一值: {combined_df['指标'].unique()}")
+        print(f"加载 {file_path} 成功！总行数：{len(combined_df)}，可用指标：{combined_df['指标'].unique()}\n预览：\n{combined_df.head()}")
+        return combined_df
+    except Exception as e:
+        print(f"加载 {file_path} 失败：{e}")
+        return None
+
+
+# 加载数据
+cpi_data = load_indicator_vertical(file_paths["CPI"], time_format='%Y-%m')
+money_data = load_indicator_vertical(file_paths["MONEY"], time_format='%Y-%m')
+unemployment_data = load_indicator_vertical(file_paths["UNEMPLOYMENT"], time_format='%Y-%m')
+gdp_data = load_indicator_vertical(file_paths["GDP"], time_format='%Y')
+housing_data = load_indicator_vertical(file_paths["HOUSING"], time_format='%Y')
+shibor_data = load_time_vertical(file_paths["SHIBOR"])
+yield_data = load_time_vertical(file_paths["YIELD"])
+
+if any(df is None for df in [cpi_data, gdp_data, money_data, unemployment_data, shibor_data, yield_data, housing_data]):
+    print("数据加载不完整，程序退出！")
+    exit()
+
+# 随机森林模型
+
+from pmdarima import auto_arima
+def random_forest_model(cpi, gdp, unemployment, money):
+    print("\n运行随机森林模型...")
+    try:
+        cpi_subset = cpi[cpi['指标'] == '居民消费价格指数(上年同月=100)'][['时间', '值']].dropna().rename(columns={'值': 'CPI'})
+        cpi_subset = cpi_subset[cpi_subset['时间'] <= '2024-12-01']
+        gdp_subset = gdp[gdp['指标'] == '国内生产总值增长(百分点)'][['时间', '值']].dropna().rename(columns={'值': 'GDP'})
+        money_subset = money[money['指标'] == '货币和准货币(M2)供应量期末值(亿元)'][['时间', '值']].dropna().rename(columns={'值': 'M2'})
+        unemployment_subset = unemployment[unemployment['指标'] == '全国城镇调查失业率(%)'][['时间', '值']].dropna().rename(columns={'值': '失业率'})
+
+        print(f"筛选后数据 - CPI: {cpi_subset.shape}, GDP: {gdp_subset.shape}, M2: {money_subset.shape}, 失业率: {unemployment_subset.shape}")
+
+        # 时间规范化
+        cpi_subset['时间'] = pd.to_datetime(cpi_subset['时间']).dt.normalize()
+        unemployment_subset['时间'] = pd.to_datetime(unemployment_subset['时间']).dt.normalize()
+        money_subset['时间'] = pd.to_datetime(money_subset['时间']).dt.normalize()
+
+        # 补全缺失月份
+        full_dates = pd.date_range(start='2018-01-01', end='2024-12-01', freq='MS')
+        unemployment_subset = unemployment_subset.set_index('时间').reindex(full_dates).reset_index().rename(columns={'index': '时间'})
+        unemployment_subset['失业率'] = unemployment_subset['失业率'].interpolate(method='linear').ffill().bfill()
+        cpi_subset = cpi_subset.set_index('时间').reindex(full_dates).reset_index().rename(columns={'index': '时间'})
+        cpi_subset['CPI'] = cpi_subset['CPI'].interpolate(method='linear').ffill().bfill()
+        money_subset = money_subset.set_index('时间').reindex(full_dates).reset_index().rename(columns={'index': '时间'})
+        money_subset['M2'] = money_subset['M2'].interpolate(method='linear').ffill().bfill()
+
+        # 预测未来10年
+        future_dates = pd.date_range(start='2025-01-01', end='2034-12-01', freq='MS')
+
+        # 失业率预测
+        unemployment_ts = unemployment_subset.set_index('时间')['失业率']
+        model_unemployment = auto_arima(unemployment_ts, seasonal=True, m=12, D=1, suppress_warnings=True, error_action='ignore')
+        unemployment_forecast = model_unemployment.predict(n_periods=len(future_dates))
+        unemployment_noise = np.random.normal(0, 0.05, len(future_dates))
+        unemployment_forecast = unemployment_forecast * (1 + unemployment_noise)
+        unemployment_forecast = np.maximum(unemployment_forecast, 4.0)
+        unemployment_forecast_df = pd.DataFrame({'时间': future_dates, '预测失业率': unemployment_forecast})
+
+        # CPI 预测
+        cpi_ts = cpi_subset.set_index('时间')['CPI']
+        model_cpi = auto_arima(cpi_ts, seasonal=True, m=12, D=1, suppress_warnings=True, error_action='ignore')
+        cpi_forecast = model_cpi.predict(n_periods=len(future_dates))
+        cpi_noise = np.random.normal(0, 0.03, len(future_dates))
+        cpi_forecast = cpi_forecast * (1 + cpi_noise)
+        cpi_forecast = np.maximum(cpi_forecast, 99.0)
+        cpi_forecast_df = pd.DataFrame({'时间': future_dates, 'CPI': cpi_forecast})
+
+        # M2 预测
+        money_ts = money_subset.set_index('时间')['M2']
+        model_money = auto_arima(money_ts, seasonal=True, m=12, D=1, suppress_warnings=True, error_action='ignore')
+        money_forecast = model_money.predict(n_periods=len(future_dates))
+        money_noise = np.random.normal(0, 0.05, len(future_dates))
+        money_forecast = money_forecast * (1 + money_noise)
+        money_forecast = np.maximum(money_forecast, money_subset['M2'].iloc[-1] * 0.9)
+        money_forecast_df = pd.DataFrame({'时间': future_dates, 'M2': money_forecast})
+
+        # GDP 预测：初步预测
+        gdp_dates = pd.date_range(start=gdp_subset['时间'].min(), end='2024-12-01', freq='MS')
+        gdp_monthly = pd.DataFrame({'时间': gdp_dates}).merge(gdp_subset, on='时间', how='left')
+        gdp_monthly['GDP'] = gdp_monthly['GDP'].interpolate(method='linear').ffill().bfill()
+        gdp_ts = gdp_monthly.set_index('时间')['GDP']
+        model_gdp = auto_arima(gdp_ts, seasonal=True, m=12, D=1, suppress_warnings=True, error_action='ignore')
+        gdp_forecast = model_gdp.predict(n_periods=len(future_dates))
+        gdp_noise = np.random.normal(0, 0.03, len(future_dates))
+        gdp_forecast = gdp_forecast * (1 + gdp_noise)
+        gdp_forecast = np.maximum(gdp_forecast, 3.0)
+        gdp_forecast_df = pd.DataFrame({'时间': future_dates, 'GDP': gdp_forecast})
+
+        # 合并预测数据
+        merged_forecast = pd.DataFrame({'时间': future_dates})
+        merged_forecast = merged_forecast.merge(unemployment_forecast_df, on='时间', how='left')
+        merged_forecast = merged_forecast.merge(cpi_forecast_df, on='时间', how='left')
+        merged_forecast = merged_forecast.merge(money_forecast_df, on='时间', how='left')
+        merged_forecast = merged_forecast.merge(gdp_forecast_df, on='时间', how='left')
+
+        # 训练随机森林模型，二次调整 GDP 预测
+        historical_data = pd.DataFrame({'时间': full_dates})
+        historical_data = historical_data.merge(unemployment_subset, on='时间', how='left')
+        historical_data = historical_data.merge(cpi_subset, on='时间', how='left')
+        historical_data = historical_data.merge(money_subset, on='时间', how='left')
+        historical_data = historical_data.merge(gdp_monthly, on='时间', how='left')
+        historical_data = historical_data.ffill().bfill()
+
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(historical_data[['CPI', 'M2', '失业率']])
+        y_train = historical_data['GDP']
+        rf = RandomForestRegressor(n_estimators=200, max_depth=10, min_samples_split=5, min_samples_leaf=2, random_state=42)
+        rf.fit(X_train, y_train)
+
+        # 替换预测时的特征，使用历史失业率而不是预测失业率
+        historical_unemployment = np.tile(unemployment_subset['失业率'].values[-1], len(future_dates))  # 使用最后一个历史值
+        merged_forecast['失业率'] = historical_unemployment
+        X_future = scaler.transform(merged_forecast[['CPI', 'M2', '失业率']])
+        final_gdp_forecast = rf.predict(X_future)
+
+        # 限制短期下降速度
+        last_gdp = gdp_monthly['GDP'].iloc[-1]
+        final_gdp_forecast_smoothed = final_gdp_forecast.copy()
+        for t in range(len(final_gdp_forecast)):
+            if t == 0:
+                final_gdp_forecast_smoothed[t] = max(last_gdp * 0.95, final_gdp_forecast[t])
+            else:
+                max_decline = final_gdp_forecast_smoothed[t-1] - 0.3
+                final_gdp_forecast_smoothed[t] = max(max_decline, final_gdp_forecast[t])
+            if future_dates[t].year <= 2029:
+                final_gdp_forecast_smoothed[t] = max(4.0, final_gdp_forecast_smoothed[t])
+            final_gdp_forecast_smoothed[t] = max(3.0, final_gdp_forecast_smoothed[t])
+
+        # 应用移动平均平滑
+        final_gdp_forecast_smoothed = pd.Series(final_gdp_forecast_smoothed).rolling(window=12, min_periods=1, center=True).mean().values
+
+        final_gdp_forecast_df = pd.DataFrame({'时间': future_dates, 'GDP': final_gdp_forecast_smoothed})
+        merged_forecast['GDP'] = final_gdp_forecast_smoothed
+
+        # 训练随机森林模型，二次调整失业率预测
+        X_train = scaler.fit_transform(historical_data[['CPI', 'M2', 'GDP']])
+        y_train = historical_data['失业率']
+        rf = RandomForestRegressor(n_estimators=200, max_depth=10, min_samples_split=5, min_samples_leaf=2, random_state=42)
+        rf.fit(X_train, y_train)
+        X_future = scaler.transform(merged_forecast[['CPI', 'M2', 'GDP']])
+        final_unemployment_forecast = rf.predict(X_future)
+        final_unemployment_forecast_df = pd.DataFrame({'时间': future_dates, '预测失业率': final_unemployment_forecast})
+
+        # 合并最终预测
+        final_forecast_df = pd.DataFrame({
+            '时间': future_dates,
+            '预测失业率': final_unemployment_forecast,
+            'CPI': cpi_forecast,
+            'M2': money_forecast,
+            'GDP': final_gdp_forecast_smoothed
+        })
+
+        # 添加统计输出
+        print(f"未来10年失业率预测均值: {final_unemployment_forecast.mean():.2f}%, 标准差: {final_unemployment_forecast.std():.2f}%")
+        print(f"未来10年CPI预测均值: {cpi_forecast.mean():.2f}, 标准差: {cpi_forecast.std():.2f}")
+        print(f"未来10年M2预测均值: {money_forecast.mean():.2f} 亿元, 标准差: {money_forecast.std():.2f} 亿元")
+        print(f"未来10年GDP预测均值: {final_gdp_forecast_smoothed.mean():.2f}%, 标准差: {final_gdp_forecast_smoothed.std():.2f}%")
+
+        # 可视化部分
+        plt.figure(figsize=(12, 6))
+        plt.plot(unemployment_subset['时间'], unemployment_subset['失业率'], label='历史失业率', color='blue', linewidth=2)
+        plt.plot(future_dates, final_unemployment_forecast, label='预测失业率 (10年)', color='red', linewidth=2, linestyle='--')
+        plt.title('随机森林模型 - 失业率预测 (2018-2034)', fontsize=14)
+        plt.xlabel('时间', fontsize=12)
+        plt.ylabel('失业率 (%)', fontsize=12)
+        plt.legend(loc='best', fontsize=10)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.xticks(pd.date_range('2018-01-01', '2035-01-01', freq='YS'), rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, 'unemployment_forecast.png'))
+        plt.close()
+
+        plt.figure(figsize=(12, 6))
+        plt.plot(cpi_subset['时间'], cpi_subset['CPI'], label='历史CPI', color='blue', linewidth=2)
+        plt.plot(future_dates, cpi_forecast, label='预测CPI (10年)', color='red', linewidth=2, linestyle='--')
+        plt.title('随机森林模型 - CPI预测 (2018-2034)', fontsize=14)
+        plt.xlabel('时间', fontsize=12)
+        plt.ylabel('CPI', fontsize=12)
+        plt.legend(loc='best', fontsize=10)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.xticks(pd.date_range('2018-01-01', '2035-01-01', freq='YS'), rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, 'cpi_forecast.png'))
+        plt.close()
+
+        plt.figure(figsize=(12, 6))
+        plt.plot(money_subset['时间'], money_subset['M2'], label='历史M2', color='blue', linewidth=2)
+        plt.plot(future_dates, money_forecast, label='预测M2 (10年)', color='red', linewidth=2, linestyle='--')
+        plt.title('随机森林模型 - M2预测 (2018-2034)', fontsize=14)
+        plt.xlabel('时间', fontsize=12)
+        plt.ylabel('M2 (亿元)', fontsize=12)
+        plt.legend(loc='best', fontsize=10)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.xticks(pd.date_range('2018-01-01', '2035-01-01', freq='YS'), rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, 'm2_forecast.png'))
+        plt.close()
+
+        plt.figure(figsize=(12, 6))
+        plt.plot(gdp_monthly['时间'], gdp_monthly['GDP'], label='历史GDP', color='blue', linewidth=2)
+        plt.plot(future_dates, final_gdp_forecast_smoothed, label='预测GDP (10年)', color='red', linewidth=2, linestyle='--')
+        plt.title('随机森林模型 - GDP预测 (2018-2034)', fontsize=14)
+        plt.xlabel('时间', fontsize=12)
+        plt.ylabel('GDP增长率 (%)', fontsize=12)
+        plt.legend(loc='best', fontsize=10)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.xticks(pd.date_range('2018-01-01', '2035-01-01', freq='YS'), rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, 'gdp_forecast.png'))
+        plt.close()
+
+        final_forecast_df.to_excel(os.path.join(OUTPUT_DIR, 'random_forest_forecast.xlsx'), index=False)
+        print(f"随机森林预测结果已保存至 {os.path.join(OUTPUT_DIR, 'random_forest_forecast.xlsx')}")
+        return final_forecast_df
+    except Exception as e:
+        print(f"随机森林模型运行失败：{e}")
+        # 返回部分结果，即使失败
+        final_forecast_df = pd.DataFrame({
+            '时间': future_dates,
+            '预测失业率': unemployment_forecast,
+            'CPI': cpi_forecast,
+            'M2': money_forecast,
+            'GDP': gdp_forecast
+        })
+        return final_forecast_df
+
+# 注：需要导入statsmodels.tsa.holtwinters.ExponentialSmoothing
+
+def cir_model(shibor):
+    print("\n运行优化版CIR模型...")
+    try:
+        # 数据准备
+        rates_df = shibor[shibor['指标'].astype(str).str.strip().str.upper() == '1M'][['时间', '值']].dropna()
+        if rates_df.empty:
+            raise ValueError("SHIBOR 1M 数据为空，请检查数据文件")
+        rates = rates_df.set_index('时间')['值'].astype(float) / 100
+        if rates.isna().any():
+            raise ValueError("SHIBOR 1M 数据中包含 nan，请检查数据完整性")
+        print(f"1M SHIBOR 数据范围：{rates.index.min()} 至 {rates.index.max()}，行数：{len(rates)}")
+
+        # 计算更精确的初始参数
+        dt = 1 / DAYS_PER_YEAR
+        daily_returns = rates.diff().dropna()
+        historical_mean = rates.mean()
+        historical_vol = daily_returns.std()
+
+        if np.isnan(historical_mean) or np.isnan(historical_vol):
+            raise ValueError("历史均值或波动率计算结果为 nan，可能由于 SHIBOR 数据异常")
+
+        # 优化参数估计
+        def cir_log_likelihood(params, rates, dt):
+            kappa, theta, sigma = params
+            r = rates.values
+            n = len(r) - 1
+            dr = np.diff(r)
+            mu = kappa * (theta - r[:-1]) * dt
+            vol = sigma * np.sqrt(np.maximum(r[:-1], 0.01)) * np.sqrt(dt)  # 防止波动率为零
+
+            # 防止对数计算错误
+            valid_indices = vol > 0
+            if not all(valid_indices):
+                return np.inf
+
+            log_lik = -0.5 * n * np.log(2 * np.pi) - np.sum(np.log(vol[valid_indices])) - 0.5 * np.sum(
+                ((dr - mu)[valid_indices] ** 2) / (vol[valid_indices] ** 2))
+            return -log_lik
+
+        # 使用更精细的参数范围
+        initial_params = [0.3, historical_mean, historical_vol * np.sqrt(252)]
+        bounds = [(0.2, 0.8),  # kappa: 更精细的均值回归速度范围
+                  (historical_mean * 0.8, historical_mean * 1.2),  # theta: 更紧的长期均值范围
+                  (historical_vol * np.sqrt(252) * 0.7, historical_vol * np.sqrt(252) * 1.3)]  # sigma
+
+        result = minimize(cir_log_likelihood, initial_params, args=(rates, dt),
+                          bounds=bounds, method='L-BFGS-B',
+                          options={'maxiter': 500, 'ftol': 1e-8})
+
+        kappa, theta, sigma = result.x
+        if np.any(np.isnan([kappa, theta, sigma])):
+            raise ValueError("CIR 模型优化参数中包含 nan，可能由于 SHIBOR 数据异常")
+        print(f"优化后的CIR参数: kappa={kappa:.4f}, theta={theta:.4f}, sigma={sigma:.4f}")
+
+        # 非线性动态调整函数
+        rf_forecast = random_forest_model(cpi_data, gdp_data, unemployment_data, money_data)
+
+        if rf_forecast is not None:
+            future_dates = pd.date_range(start='2025-01-01', end='2034-12-01', freq='MS')
+            gdp_forecast = rf_forecast[rf_forecast['时间'].isin(future_dates)]['GDP'].values
+            m2_forecast = rf_forecast[rf_forecast['时间'].isin(future_dates)]['M2'].values
+            cpi_forecast = rf_forecast[rf_forecast['时间'].isin(future_dates)]['CPI'].values
+
+            # 检查预测数据是否包含 nan，并用均值填充
+            if np.any(np.isnan(gdp_forecast)):
+                gdp_mean = np.nanmean(gdp_forecast)
+                gdp_forecast = np.nan_to_num(gdp_forecast, nan=gdp_mean)
+            if np.any(np.isnan(m2_forecast)):
+                m2_mean = np.nanmean(m2_forecast)
+                m2_forecast = np.nan_to_num(m2_forecast, nan=m2_mean)
+            if np.any(np.isnan(cpi_forecast)):
+                cpi_mean = np.nanmean(cpi_forecast)
+                cpi_forecast = np.nan_to_num(cpi_forecast, nan=cpi_mean)
+
+            # 非线性调整函数 - 使用二次项和交互项
+            gdp_dev = (gdp_forecast / gdp_forecast.mean() - 1)
+            m2_dev = (m2_forecast / m2_forecast.mean() - 1)
+            cpi_dev = (cpi_forecast / cpi_forecast.mean() - 1)
+
+            # 组合多种非线性效应
+            theta_dynamic = theta * (1 +
+                                     0.6 * gdp_dev +
+                                     0.3 * m2_dev +
+                                     0.2 * cpi_dev +
+                                     0.15 * (gdp_dev ** 2) +
+                                     0.1 * (m2_dev ** 2) +
+                                     0.05 * (gdp_dev * m2_dev) +
+                                     0.1 * np.tanh(2 * cpi_dev))  # 使用双曲正切函数限制极端值影响
+
+            if np.any(np.isnan(theta_dynamic)):
+                theta_dynamic = np.nan_to_num(theta_dynamic, nan=theta)  # 如果 theta_dynamic 包含 nan，用 theta 填充
+        else:
+            theta_dynamic = np.full(FORECAST_DAYS, theta)  # 默认使用静态 theta
+
+        # 蒙特卡洛模拟（增加随机性）
+        simulations = 1000
+        simulated_paths = np.zeros((FORECAST_DAYS + 1, simulations))
+        simulated_paths[0] = rates.iloc[-1]
+
+        # 引入随机波动率
+        vol_shocks = np.random.normal(1, 0.15, FORECAST_DAYS)  # 波动率冲击
+
+        for t in range(FORECAST_DAYS):
+            # 时间衰减的均值回复效应
+            time_decay = 1 - np.exp(-t / (FORECAST_DAYS * 0.5))
+            current_kappa = kappa * (0.5 + 0.5 * time_decay)  # 初期回复快，后期回复慢
+
+            # 选择对应的 theta
+            theta_idx = min(t // (FORECAST_DAYS // len(theta_dynamic)), len(theta_dynamic) - 1)
+            theta_t = theta_dynamic[theta_idx]
+
+            # 模拟带有随机波动率的 CIR 过程
+            volatility = sigma * np.sqrt(np.maximum(simulated_paths[t], 0.01)) * vol_shocks[min(t, len(vol_shocks) - 1)]
+            dr = current_kappa * (theta_t - simulated_paths[t]) * dt + volatility * np.random.normal(
+                size=simulations) * np.sqrt(dt)
+
+            # 应用跳跃扩散过程（5%概率发生跳跃）
+            jump_prob = 0.05
+            jump_size = np.random.normal(0, 0.005, simulations) if np.random.random() < jump_prob else np.zeros(
+                simulations)
+
+            simulated_paths[t + 1] = simulated_paths[t] + dr + jump_size
+            simulated_paths[t + 1] = np.maximum(simulated_paths[t + 1], 0.0001)  # 确保利率为正
+
+            # 检查模拟路径是否包含 nan
+            if np.any(np.isnan(simulated_paths[t + 1])):
+                simulated_paths[t + 1] = np.nan_to_num(simulated_paths[t + 1], nan=simulated_paths[t])  # 用前一时间步的值填充
+
+        # 计算统计量
+        mean_path = simulated_paths.mean(axis=1)
+        lower_bound = np.percentile(simulated_paths, 5, axis=1)
+        upper_bound = np.percentile(simulated_paths, 95, axis=1)
+
+        # 确保统计量不包含 nan
+        mean_path = np.nan_to_num(mean_path, nan=historical_mean)  # 用历史均值填充
+        lower_bound = np.nan_to_num(lower_bound, nan=historical_mean * 0.9)
+        upper_bound = np.nan_to_num(upper_bound, nan=historical_mean * 1.1)
+
+        # 计算波动率指标
+        path_volatility = np.std(simulated_paths, axis=1)
+        path_volatility = np.nan_to_num(path_volatility, nan=historical_vol)  # 用历史波动率填充
+        avg_future_vol = np.mean(path_volatility[1:])
+        print(f"未来10年SHIBOR 1M预测均值: {mean_path[1:].mean():.4f}, 平均波动率: {avg_future_vol:.4f}")
+        print(f"未来10年SHIBOR 1M 5%-95%置信区间: [{lower_bound[1:].mean():.4f}, {upper_bound[1:].mean():.4f}]")
+
+        # 可视化改进
+        future_dates = pd.date_range(rates.index[-1], periods=FORECAST_DAYS + 1, freq='B')[1:]
+
+        plt.figure(figsize=(14, 7))
+
+        # 历史数据
+        plt.plot(rates.index, rates, label='历史1M SHIBOR', color='blue', linewidth=2.5)
+
+        # 预测结果
+        plt.plot(future_dates, mean_path[1:], label='CIR预测均值 (10年)', color='red', linewidth=2.5, linestyle='--')
+
+        # 展示多条模拟路径增加真实感
+        for i in range(min(10, simulations)):
+            alpha = 0.2 if i > 0 else 0  # 第一条路径不显示，避免图例混乱
+            plt.plot(future_dates, simulated_paths[1:, i], color='gray', alpha=alpha, linewidth=0.8)
+
+        # 置信区间
+        plt.fill_between(future_dates, lower_bound[1:], upper_bound[1:], color='red', alpha=0.15, label='90%置信区间')
+
+        # 波动率可视化参考线
+        plt.plot(future_dates, mean_path[1:] + path_volatility[1:], 'g--', alpha=0.5, linewidth=1, label='±1标准差')
+        plt.plot(future_dates, mean_path[1:] - path_volatility[1:], 'g--', alpha=0.5, linewidth=1)
+
+        plt.title('优化版CIR模型 - SHIBOR 1M利率预测 (2017-2034)', fontsize=15, pad=12)
+        plt.xlabel('时间', fontsize=13)
+        plt.ylabel('利率 (%)', fontsize=13)
+        plt.legend(loc='upper left', fontsize=11)
+        plt.grid(True, linestyle='--', alpha=0.7)
+
+        # 调整x轴显示
+        plt.xticks(pd.date_range('2017-01-01', '2035-01-01', freq='YS'), rotation=45)
+        plt.xlim(pd.to_datetime('2017-01-01'), pd.to_datetime('2035-01-01'))
+
+        # 添加水平参考线
+        plt.axhline(y=historical_mean, color='black', linestyle=':', alpha=0.5, label='历史均值')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, 'optimized_cir_shibor_forecast.png'), dpi=300)
+        plt.close()
+
+        # 保存预测结果
+        forecast_df = pd.DataFrame({
+            '时间': future_dates,
+            'SHIBOR_1M': mean_path[1:],
+            '下限': lower_bound[1:],
+            '上限': upper_bound[1:]
+        })
+        if forecast_df.isna().any().any():
+            raise ValueError("forecast_df 中包含 nan，请检查 CIR 模型输出")
+        forecast_df.to_excel(os.path.join(OUTPUT_DIR, 'optimized_cir_forecast.xlsx'), index=False)
+        print(f"优化版CIR模型预测结果已保存至 {os.path.join(OUTPUT_DIR, 'optimized_cir_forecast.xlsx')}")
+
+        return forecast_df
+    except Exception as e:
+        print(f"CIR模型运行失败：{e}")
+        return None
+
+# 修改 hull_white_model 函数
+def hull_white_model(yield_curve):
+    print("\n运行Hull-White模型...")
+    try:
+        yield_10y = yield_curve[yield_curve['指标'].astype(str).str.strip().str.upper() == '10年'][['时间', '值']].dropna()
+        yield_10y['值'] = yield_10y['值'].astype(float) / 100
+        yield_10y = yield_10y.set_index('时间')['值']
+        if yield_10y.isna().any():
+            raise ValueError("10年国债收益率数据中包含 nan，请检查数据完整性")
+        print(f"10年国债收益率数据范围：{yield_10y.index.min()} 至 {yield_10y.index.max()}，行数：{len(yield_10y)}")
+
+        dt = 1 / DAYS_PER_YEAR
+        def hull_white_likelihood(params, rates, dt):
+            kappa, sigma = params
+            theta = rates.mean()
+            r = rates.values
+            n = len(r) - 1
+            dr = np.diff(r)
+            mu = (theta - kappa * r[:-1]) * dt
+            vol = sigma * np.sqrt(dt)
+            log_lik = -0.5 * n * np.log(2 * np.pi) - n * np.log(vol) - 0.5 * np.sum((dr - mu)**2 / vol**2)
+            return -log_lik
+
+        recent_yield = yield_10y[yield_10y.index >= '2019-01-01']
+        initial_theta = recent_yield.mean()
+        initial_params = [0.05, recent_yield.diff().std() * np.sqrt(DAYS_PER_YEAR) * 1.5]
+        bounds = [(0.01, 0.2), (0.001, 0.015)]
+        result = minimize(hull_white_likelihood, initial_params, args=(yield_10y, dt), bounds=bounds, method='L-BFGS-B')
+        kappa, sigma = result.x
+        if np.any(np.isnan([kappa, sigma])):
+            raise ValueError("Hull-White 模型优化参数中包含 nan，可能由于国债收益率数据异常")
+        print(f"优化后的Hull-White参数: kappa={kappa:.4f}, sigma={sigma:.4f}")
+
+        rf_forecast = random_forest_model(cpi_data, gdp_data, unemployment_data, money_data)
+        if rf_forecast is not None:
+            future_dates = pd.date_range(start='2025-01-01', end='2034-12-01', freq='MS')
+            cpi_forecast = rf_forecast[rf_forecast['时间'].isin(future_dates)]['CPI'].values
+            gdp_forecast = rf_forecast[rf_forecast['时间'].isin(future_dates)]['GDP'].values
+            historical_cpi = cpi_data[cpi_data['时间'] >= '2019-01-01']
+            historical_cpi = historical_cpi[historical_cpi['指标'] == '居民消费价格指数(上年同月=100)']
+            historical_cpi_growth = historical_cpi['值'].pct_change().mean() * 100
+            inflation_expectation = (cpi_forecast / cpi_forecast.mean()) * (historical_cpi_growth / 100 + 1)
+            theta_dynamic = initial_theta * (1 + 0.1 * (cpi_forecast / cpi_forecast.mean() - 1) +
+                                           0.05 * (gdp_forecast / gdp_forecast.mean() - 1) +
+                                           0.02 * (inflation_expectation / inflation_expectation.mean() - 1))
+            theta_dynamic = np.clip(theta_dynamic, 0.02, 0.04)
+        else:
+            theta_dynamic = np.full(FORECAST_DAYS, initial_theta)
+
+        simulations = 1000
+        simulated_paths = np.zeros((FORECAST_DAYS + 1, simulations))
+        simulated_paths[0] = yield_10y.iloc[-1]
+        for t in range(FORECAST_DAYS):
+            theta_t = theta_dynamic[t // (FORECAST_DAYS // len(theta_dynamic))] if t < FORECAST_DAYS else theta_dynamic[-1]
+            dr = (theta_t - kappa * simulated_paths[t]) * dt + sigma * np.random.normal(size=simulations) * np.sqrt(dt)
+            simulated_paths[t + 1] = simulated_paths[t] + dr
+            simulated_paths[t + 1] = np.maximum(simulated_paths[t + 1], 0)
+
+        mean_path = simulated_paths.mean(axis=1)
+        lower_bound = np.percentile(simulated_paths, 5, axis=1)
+        upper_bound = np.percentile(simulated_paths, 95, axis=1)
+
+        print(f"未来10年10年国债收益率预测均值: {mean_path[1:].mean():.4f}, 标准差: {mean_path[1:].std():.4f}")
+        print(f"未来10年10年国债收益率 5%-95%置信区间: [{lower_bound[1:].mean():.4f}, {upper_bound[1:].mean():.4f}]")
+
+        future_dates = pd.date_range(yield_10y.index[-1], periods=FORECAST_DAYS + 1, freq='B')[1:]
+        plt.figure(figsize=(12, 6))
+        plt.plot(yield_10y.index, yield_10y, label='历史10年国债收益率', color='green', linewidth=2)
+        plt.plot(future_dates, mean_path[1:], label='Hull-White预测均值 (10年)', color='red', linewidth=2, linestyle='--')
+        for i in range(5):
+            plt.plot(future_dates, simulated_paths[1:, i], color='gray', alpha=0.3, linewidth=1, label='模拟路径' if i == 0 else None)
+        plt.fill_between(future_dates, lower_bound[1:], upper_bound[1:], color='red', alpha=0.2, label='90%置信区间')
+        plt.title('Hull-White模型 - 10年国债收益率预测 (2017-2034)', fontsize=14, pad=10)
+        plt.xlabel('时间', fontsize=12)
+        plt.ylabel('收益率 (%)', fontsize=12)
+        plt.legend(loc='best', fontsize=10)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.xticks(pd.date_range('2017-01-01', '2035-01-01', freq='YS'), rotation=45)
+        plt.xlim(pd.to_datetime('2017-01-01'), pd.to_datetime('2035-01-01'))
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, 'hull_white_yield_forecast.png'))
+        plt.close()
+
+        forecast_df = pd.DataFrame({'时间': future_dates, '10年国债收益率': mean_path[1:]})
+        forecast_df.to_excel(os.path.join(OUTPUT_DIR, 'hull_white_forecast.xlsx'), index=False)
+        print(f"Hull-White模型预测结果已保存至 {os.path.join(OUTPUT_DIR, 'hull_white_forecast.xlsx')}")
+        return forecast_df
+    except Exception as e:
+        print(f"Hull-White模型运行失败：{e}")
+        return None
+# OAS模型
+
+def oas_model(shibor, yield_curve):
+    print("\n运行期权调整利差模型...")
+    try:
+        shibor_1m = shibor[shibor['指标'].astype(str).str.strip().str.upper() == '1M'][['时间', '值']].dropna().rename(columns={'值': '1M'})
+        yield_10y = yield_curve[yield_curve['指标'].astype(str).str.strip().str.upper() == '10年'][['时间', '值']].dropna().rename(columns={'值': '10年'})
+        merged_data = shibor_1m.merge(yield_10y, on='时间', how='inner')
+        risk_free = merged_data['1M'].astype(float) / 100
+        bond_yield = merged_data['10年'].astype(float) / 100
+        oas_history = bond_yield - risk_free
+
+        dt_day = 1 / DAYS_PER_YEAR
+        def oas_objective(params, rf, bond_yield):
+            oas = params[0]
+            T = 10
+            sigma = bond_yield.diff().std() * np.sqrt(DAYS_PER_YEAR) or 0.01
+            d1 = (np.log(bond_yield / rf) + (oas + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+            d2 = d1 - sigma * np.sqrt(T)
+            option_value = bond_yield * norm.cdf(d1) - rf * norm.cdf(d2)
+            adjusted_yield = bond_yield - option_value
+            return np.sum((adjusted_yield - (rf + oas))**2)
+
+        # 提高初始OAS值
+        initial_oas = [0.01]  # 从0.0050提高到0.01
+        bounds = [(0.005, 0.05)]
+        result = minimize(oas_objective, initial_oas, args=(risk_free, bond_yield), bounds=bounds)
+        oas = result.x[0]
+        print(f"优化后的OAS初始值: {oas:.4f}")
+
+        future_oas = np.zeros(FORECAST_DAYS)
+        future_oas[0] = oas
+        oas_volatility = oas_history.std() * np.sqrt(dt_day) * 2  # 增加波动性
+        for t in range(1, FORECAST_DAYS):
+            future_oas[t] = future_oas[t-1] + np.random.normal(0, oas_volatility)
+            future_oas[t] = max(future_oas[t], 0)
+
+        future_dates = pd.date_range(merged_data['时间'].max(), periods=FORECAST_DAYS + 1, freq='B')[1:]
+        plt.figure(figsize=(12, 6))
+        plt.plot(merged_data['时间'], oas_history, label='历史OAS', color='blue', linewidth=2)
+        plt.plot(future_dates, future_oas, label='预测OAS (10年)', color='red', linewidth=2, linestyle='--')
+        plt.title('期权调整利差 - 10年国债OAS预测', fontsize=14, pad=10)
+        plt.xlabel('时间', fontsize=12)
+        plt.ylabel('OAS (%)', fontsize=12)
+        plt.legend(loc='best', fontsize=10)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, 'oas_forecast.png'))
+        plt.close()
+
+        forecast_df = pd.DataFrame({'时间': future_dates, '预测OAS': future_oas})
+        forecast_df.to_excel(os.path.join(OUTPUT_DIR, 'oas_forecast.xlsx'), index=False)
+        print(f"OAS预测结果已保存至 {os.path.join(OUTPUT_DIR, 'oas_forecast.xlsx')}")
+        print(f"未来10年OAS均值: {future_oas.mean():.4f}, 标准差: {future_oas.std():.4f}")
+        return forecast_df
+    except Exception as e:
+        print(f"期权调整利差模型运行失败：{e}")
+        return None
+
+
+# 现金流模拟函数
+def simulate_cash_flows(infra_revenue: 'InfrastructureRevenue', simulations: int = 1000) -> np.ndarray:
+    """
+    使用蒙特卡洛方法模拟基础设施的现金流
+    :param infra_revenue: InfrastructureRevenue对象
+    :param simulations: 模拟路径数量
+    :return: 现金流数组，形状为 (FORECAST_MONTHS, simulations)
+    """
+    cash_flows = np.zeros((FORECAST_MONTHS, simulations))
+
+    for stream in infra_revenue.revenue_streams:
+        # 初始金额（月度）
+        monthly_base = stream.base_amount / MONTHS_PER_YEAR
+        stream_cash_flows = np.zeros((FORECAST_MONTHS, simulations))
+
+        if stream.is_stable:
+            # 稳定收入：考虑合同期限和续约率
+            contract_months = stream.contract_period
+            renewal_prob = stream.renewal_rate
+            current_contract_end = contract_months
+
+            for t in range(FORECAST_MONTHS):
+                if t >= current_contract_end:
+                    renew = np.random.binomial(1, renewal_prob, simulations)
+                    if np.mean(renew) > 0:
+                        current_contract_end += contract_months
+                    else:
+                        continue
+
+                year = t // MONTHS_PER_YEAR
+                month = (t % MONTHS_PER_YEAR) + 1
+                growth_factor = (1 + stream.growth_rate) ** year
+                seasonal_factor = stream.seasonality.get(month, 1.0)
+                growth_noise = np.random.normal(0, 0.02, simulations)  # 2%随机波动
+                monthly_amount = monthly_base * growth_factor * (1 + growth_noise) * seasonal_factor
+                stream_cash_flows[t] = monthly_amount * (t < current_contract_end)
+        else:
+            # 不稳定收入：直接按增长率和季节性调整
+            for t in range(FORECAST_MONTHS):
+                year = t // MONTHS_PER_YEAR
+                month = (t % MONTHS_PER_YEAR) + 1
+                growth_factor = (1 + stream.growth_rate) ** year
+                seasonal_factor = stream.seasonality.get(month, 1.0)
+                growth_noise = np.random.normal(0, 0.02, simulations)
+                monthly_amount = monthly_base * growth_factor * (1 + growth_noise) * seasonal_factor
+                stream_cash_flows[t] = monthly_amount
+
+        cash_flows += stream_cash_flows
+
+    return cash_flows
+# 蒙特卡洛模拟与资产证券化分析
+
+def monte_carlo_securitization(infra_revenue: 'InfrastructureRevenue', shibor, yield_curve, oas_forecast):
+    print(f"\n运行蒙特卡洛模拟与资产证券化分析 ({infra_revenue.asset_type.value})...")
+    try:
+        # 数据准备
+        shibor_1m = shibor[shibor['指标'].astype(str).str.strip().str.upper() == '1M'][['时间', '值']].dropna()
+        shibor_1m['值'] = shibor_1m['值'].astype(float) / 100
+        shibor_1m = shibor_1m.set_index('时间')['值']
+        yield_10y = yield_curve[yield_curve['指标'].astype(str).str.strip().str.upper() == '10年'][['时间', '值']].dropna()
+        yield_10y['值'] = yield_10y['值'].astype(float) / 100
+        yield_10y = yield_10y.set_index('时间')['值']
+        oas_data = oas_forecast.set_index('时间')['预测OAS'].values / 100
+
+        # 参数设置
+        simulations = 1000
+        dt_day = 1 / DAYS_PER_YEAR
+        dt_month = 1 / 12
+
+        # CIR模型参数估计 (SHIBOR 1M)
+        def cir_log_likelihood(params, rates, dt):
+            kappa, theta, sigma = params
+            r = rates.values
+            n = len(r) - 1
+            dr = np.diff(r)
+            mu = kappa * (theta - r[:-1]) * dt
+            vol = sigma * np.sqrt(np.maximum(r[:-1], 0)) * np.sqrt(dt)
+            log_lik = -0.5 * n * np.log(2 * np.pi) - np.sum(np.log(vol)) - 0.5 * np.sum((dr - mu)**2 / vol**2)
+            return -log_lik
+
+        initial_params_cir = [0.1, shibor_1m.mean(), shibor_1m.diff().std() * np.sqrt(DAYS_PER_YEAR)]
+        bounds_cir = [(0.01, 1), (shibor_1m.mean() * 0.5, shibor_1m.mean() * 1.5), (0.01, 0.25)]
+        result_cir = minimize(cir_log_likelihood, initial_params_cir, args=(shibor_1m, dt_day), bounds=bounds_cir, method='L-BFGS-B')
+        kappa_shibor, theta_shibor, sigma_shibor = result_cir.x
+
+        # Hull-White模型参数估计 (10年国债收益率)
+        def hull_white_likelihood(params, rates, dt):
+            kappa, sigma = params
+            theta = rates.mean()
+            r = rates.values
+            n = len(r) - 1
+            dr = np.diff(r)
+            mu = (theta - kappa * r[:-1]) * dt
+            vol = sigma * np.sqrt(dt)
+            log_lik = -0.5 * n * np.log(2 * np.pi) - n * np.log(vol) - 0.5 * np.sum((dr - mu)**2 / vol**2)
+            return -log_lik
+
+        initial_params_hw = [0.05, yield_10y.diff().std() * np.sqrt(DAYS_PER_YEAR)]
+        bounds_hw = [(0.01, 0.05), (0.001, 0.01)]
+        result_hw = minimize(hull_white_likelihood, initial_params_hw, args=(yield_10y, dt_day), bounds=bounds_hw, method='L-BFGS-B')
+        kappa_yield, sigma_yield = result_hw.x
+        theta_yield = yield_10y.mean()
+
+        print(f"SHIBOR 1M CIR 参数: kappa={kappa_shibor}, theta={theta_shibor}, sigma={sigma_shibor}")
+        print(f"10年国债收益率 Hull-White 参数: kappa={kappa_yield}, theta={theta_yield}, sigma={sigma_yield}")
+
+        # 模拟利率路径
+        shibor_paths = cir_path(shibor_1m.iloc[-1], kappa_shibor, theta_shibor, sigma_shibor, dt_day, FORECAST_DAYS, simulations)
+        yield_paths = hull_white_path(yield_10y.iloc[-1], kappa_yield, theta_yield, sigma_yield, dt_day, FORECAST_DAYS, simulations)
+        oas_paths = np.tile(oas_data[:FORECAST_DAYS], (simulations, 1)).T
+
+        # 修正daily_dates，确保长度为FORECAST_DAYS
+        start_date = shibor_1m.index[-1] + pd.Timedelta(days=1)
+        daily_dates = pd.date_range(start=start_date, periods=FORECAST_DAYS, freq='D')[:FORECAST_DAYS]
+        shibor_df = pd.DataFrame(shibor_paths[:FORECAST_DAYS], index=daily_dates).clip(lower=0)
+        yield_df = pd.DataFrame(yield_paths[:FORECAST_DAYS], index=daily_dates).clip(lower=0)
+        oas_df = pd.DataFrame(oas_paths[:FORECAST_DAYS], index=daily_dates).clip(lower=0)
+
+        monthly_dates = pd.date_range(start=shibor_1m.index[-1], periods=FORECAST_MONTHS, freq='ME')
+        shibor_monthly = shibor_df.resample('ME').mean().reindex(monthly_dates, method='ffill').values.T
+        yield_monthly = yield_df.resample('ME').mean().reindex(monthly_dates, method='ffill').values.T
+        oas_monthly = oas_df.resample('ME').mean().reindex(monthly_dates, method='ffill').values.T
+
+        # 模拟现金流
+        cash_flows = simulate_cash_flows(infra_revenue, simulations).T
+        if np.any(np.isnan(cash_flows)):
+            raise ValueError(f"cash_flows 包含 NaN 值，检查 {infra_revenue.asset_type.value} 的参数")
+
+        # 贴现现金流
+        npv_paths = np.zeros(simulations)
+        discount_factors = np.ones((FORECAST_MONTHS, simulations))
+        for t in range(FORECAST_MONTHS):
+            rate = shibor_monthly[:, t] if t < 12 else (yield_monthly[:, t] + oas_monthly[:, t])
+            rate = np.nan_to_num(rate, nan=0.0001)
+            rate = np.maximum(rate, 0.0001)
+            discount_factors[t] = np.exp(-rate * dt_month)
+            if t > 0:
+                discount_factors[t] *= discount_factors[t-1]
+            npv_paths += cash_flows[:, t] * discount_factors[t]
+
+        if np.any(np.isnan(npv_paths)):
+            raise ValueError(f"npv_paths 包含 NaN 值，t={t}, rate={rate}, cash_flows[{t}]={cash_flows[:, t]}")
+
+        # 可视化
+        plt.figure(figsize=(10, 6))
+        plt.hist(npv_paths, bins=50, density=True, alpha=0.7, color='blue')
+        plt.title(f'基础设施 {infra_revenue.asset_type.value} 10年NPV分布', fontsize=14)
+        plt.xlabel('净现值 (万元人民币)', fontsize=12)
+        plt.ylabel('概率密度', fontsize=12)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, f'npv_distribution_{infra_revenue.asset_type.value}.png'))
+        plt.close()
+
+        plt.figure(figsize=(12, 6))
+        plt.plot(monthly_dates, cash_flows.mean(axis=0), label='平均月度现金流', color='blue', linewidth=2)
+        plt.fill_between(monthly_dates, np.percentile(cash_flows, 5, axis=0), np.percentile(cash_flows, 95, axis=0),
+                         color='blue', alpha=0.2, label='90%置信区间')
+        plt.title(f'基础设施 {infra_revenue.asset_type.value} 10年现金流预测', fontsize=14)
+        plt.xlabel('时间', fontsize=12)
+        plt.ylabel('月度现金流 (万元人民币)', fontsize=12)
+        plt.legend(loc='best', fontsize=10)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, f'cash_flow_forecast_{infra_revenue.asset_type.value}.png'))
+        plt.close()
+
+        forecast_df = pd.DataFrame({
+            '时间': monthly_dates,
+            '平均现金流': cash_flows.mean(axis=0),
+            '现金流下限(5%)': np.percentile(cash_flows, 5, axis=0),
+            '现金流上限(95%)': np.percentile(cash_flows, 95, axis=0),
+            '平均SHIBOR_1M': shibor_monthly.mean(axis=0) * 100,
+            '平均10年国债收益率': yield_monthly.mean(axis=0) * 100,
+            '平均OAS': oas_monthly.mean(axis=0) * 100
+        })
+        forecast_df.to_excel(os.path.join(OUTPUT_DIR, f'cash_flow_forecast_{infra_revenue.asset_type.value}.xlsx'), index=False)
+        print(f"现金流预测结果已保存至 {os.path.join(OUTPUT_DIR, f'cash_flow_forecast_{infra_revenue.asset_type.value}.xlsx')}")
+        print(f"未来10年NPV均值: {npv_paths.mean():.2f} 万元, 标准差: {npv_paths.std():.2f} 万元")
+        print(f"NPV 5%-95% 分位数: [{np.percentile(npv_paths, 5):.2f}, {np.percentile(npv_paths, 95):.2f}] 万元")
+
+        # 修改返回值为包含利率和OAS路径
+        return forecast_df, npv_paths, cash_flows, shibor_monthly, yield_monthly, oas_monthly
+    except Exception as e:
+        print(f"蒙特卡洛模拟与资产证券化分析运行失败：{e}")
+        return None, None, None, None, None, None
+
+# 辅助函数：模拟CIR路径
+def cir_path(r0, kappa, theta, sigma, dt, steps, simulations):
+    paths = np.zeros((steps + 1, simulations))
+    paths[0] = r0
+    for t in range(steps):
+        dr = kappa * (theta - paths[t]) * dt + sigma * np.sqrt(np.maximum(paths[t], 0)) * np.random.normal(size=simulations) * np.sqrt(dt)
+        paths[t + 1] = paths[t] + dr
+    return paths
+
+# 辅助函数：模拟Hull-White路径
+def hull_white_path(r0, kappa, theta, sigma, dt, steps, simulations):
+    paths = np.zeros((steps + 1, simulations))
+    paths[0] = r0
+    for t in range(steps):
+        dr = (theta - kappa * paths[t]) * dt + sigma * np.random.normal(size=simulations) * np.sqrt(dt)
+        paths[t + 1] = paths[t] + dr
+        paths[t + 1] = np.maximum(paths[t + 1], 0)
+    return paths
+
+# 加载数据（已存在）
+cpi_data = load_indicator_vertical(file_paths["CPI"], time_format='%Y-%m')
+money_data = load_indicator_vertical(file_paths["MONEY"], time_format='%Y-%m')
+unemployment_data = load_indicator_vertical(file_paths["UNEMPLOYMENT"], time_format='%Y-%m')
+gdp_data = load_indicator_vertical(file_paths["GDP"], time_format='%Y')
+housing_data = load_indicator_vertical(file_paths["HOUSING"], time_format='%Y')
+shibor_data = load_time_vertical(file_paths["SHIBOR"])
+yield_data = load_time_vertical(file_paths["YIELD"])
+
+if any(df is None for df in [cpi_data, gdp_data, money_data, unemployment_data, shibor_data, yield_data, housing_data]):
+    print("数据加载不完整，程序退出！")
+    exit()
+
+# 加载数据（已存在）
+cpi_data = load_indicator_vertical(file_paths["CPI"], time_format='%Y-%m')
+money_data = load_indicator_vertical(file_paths["MONEY"], time_format='%Y-%m')
+unemployment_data = load_indicator_vertical(file_paths["UNEMPLOYMENT"], time_format='%Y-%m')
+gdp_data = load_indicator_vertical(file_paths["GDP"], time_format='%Y')
+housing_data = load_indicator_vertical(file_paths["HOUSING"], time_format='%Y')
+shibor_data = load_time_vertical(file_paths["SHIBOR"])
+yield_data = load_time_vertical(file_paths["YIELD"])
+
+if any(df is None for df in [cpi_data, gdp_data, money_data, unemployment_data, shibor_data, yield_data, housing_data]):
+    print("数据加载不完整，程序退出！")
+    exit()
+
+# 加载数据（已存在）
+cpi_data = load_indicator_vertical(file_paths["CPI"], time_format='%Y-%m')
+money_data = load_indicator_vertical(file_paths["MONEY"], time_format='%Y-%m')
+unemployment_data = load_indicator_vertical(file_paths["UNEMPLOYMENT"], time_format='%Y-%m')
+gdp_data = load_indicator_vertical(file_paths["GDP"], time_format='%Y')
+housing_data = load_indicator_vertical(file_paths["HOUSING"], time_format='%Y')
+shibor_data = load_time_vertical(file_paths["SHIBOR"])
+yield_data = load_time_vertical(file_paths["YIELD"])
+
+if any(df is None for df in [cpi_data, gdp_data, money_data, unemployment_data, shibor_data, yield_data, housing_data]):
+    print("数据加载不完整，程序退出！")
+    exit()
+
+# 加载数据（已存在）
+cpi_data = load_indicator_vertical(file_paths["CPI"], time_format='%Y-%m')
+money_data = load_indicator_vertical(file_paths["MONEY"], time_format='%Y-%m')
+unemployment_data = load_indicator_vertical(file_paths["UNEMPLOYMENT"], time_format='%Y-%m')
+gdp_data = load_indicator_vertical(file_paths["GDP"], time_format='%Y')
+housing_data = load_indicator_vertical(file_paths["HOUSING"], time_format='%Y')
+shibor_data = load_time_vertical(file_paths["SHIBOR"])
+yield_data = load_time_vertical(file_paths["YIELD"])
+
+if any(df is None for df in [cpi_data, gdp_data, money_data, unemployment_data, shibor_data, yield_data, housing_data]):
+    print("数据加载不完整，程序退出！")
+    exit()
+
+# 运行所有模型
+rf_forecast = random_forest_model(cpi_data, gdp_data, unemployment_data, money_data)
+cir_forecast = cir_model(shibor_data)
+hw_forecast = hull_white_model(yield_data)
+oas_forecast = oas_model(shibor_data, yield_data)
+
+# 主循环部分
+infrastructure_types = list(InfrastructureType)
+cash_flow_forecasts = {}
+npv_distributions = {}
+all_npv_paths = []
+all_cash_flows = []
+last_shibor_monthly = None
+last_yield_monthly = None
+last_oas_monthly = None
+
+stability_metrics_all = []
+risk_assessments_all = []
+stress_results_all = []
+npv_means = []
+
+for infra_type in infrastructure_types:
+    infra_revenue = InfrastructureRevenue.create_default_revenue(infra_type)
+    forecast_df, npv_paths, cash_flows, shibor_monthly, yield_monthly, oas_monthly = monte_carlo_securitization(infra_revenue, shibor_data, yield_data, oas_forecast)
+    if forecast_df is not None:
+        cash_flow_forecasts[infra_type] = forecast_df
+        npv_distributions[infra_type] = npv_paths
+        all_npv_paths.append(npv_paths)
+        all_cash_flows.append(cash_flows)
+        last_shibor_monthly = shibor_monthly
+        last_yield_monthly = yield_monthly
+        last_oas_monthly = oas_monthly
+
+        stability_metrics = infra_revenue.get_revenue_stability_metrics()
+        print(f"\n{infra_type.value} 收入稳定性评估:")
+        for metric, value in stability_metrics.items():
+            print(f"{metric}: {value:.4f}")
+        stability_metrics_all.append(stability_metrics)
+
+        asset = LowAltitudeInfrastructureAsset(location_tier=2)
+        risk_system = RiskAssessmentSystem(asset, infra_revenue)
+        risk_assessment = risk_system.get_overall_risk_assessment()
+        print(f"{infra_type.value} 风险评估:")
+        print(f"综合风险评分: {risk_assessment['overall_risk_score']:.4f}")
+        print(f"风险等级: {risk_assessment['risk_level']}")
+        for risk_type, score in risk_assessment['detailed_scores'].items():
+            print(f"{risk_type}: {score:.4f}")
+        risk_assessments_all.append(risk_assessment)
+
+        labels = list(risk_assessment['detailed_scores'].keys())
+        values = list(risk_assessment['detailed_scores'].values())
+        num_vars = len(labels)
+
+        angles = np.linspace(0, 2 * np.pi, num_vars, endpoint=False).tolist()
+        values += values[:1]
+        labels += labels[:1]
+        angles += angles[:1]
+
+        print(f"Angles length: {len(angles)}, Values length: {len(values)}")
+        if len(angles) != len(values):
+            raise ValueError(f"Angles and Values lengths do not match: {len(angles)} vs {len(values)}")
+
+        fig, ax = plt.subplots(figsize=(8, 8), subplot_kw=dict(polar=True))
+        ax.fill(angles, values, color='red', alpha=0.25)
+        ax.plot(angles, values, color='red', linewidth=2)
+
+        ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
+        ax.set_yticklabels(['0.2', '0.4', '0.6', '0.8', '1.0'], fontsize=10, color='black')
+
+        ax.set_xticks(angles[:-1])
+        ax.set_xticklabels(labels[:-1], fontsize=10)
+
+        plt.title(f'{infra_type.value} 风险评估雷达图\n(评分范围：0-1，0表示无风险，1表示最高风险)', size=14, pad=20)
+
+        for i, (angle, value) in enumerate(zip(angles[:-1], values[:-1])):
+            ax.text(angle, value + 0.05, f'{value:.4f}', ha='center', va='center', fontsize=8, color='blue')
+
+        try:
+            plt.tight_layout()
+        except Exception as e:
+            print(f"调整布局时发生错误：{e}")
+        plt.savefig(os.path.join(OUTPUT_DIR, f'risk_radar_{infra_type.value}.png'))
+        plt.close()
+
+        stress_test = CashflowStressTest(infra_revenue, risk_system)
+        stress_results = stress_test.run_stress_test()
+        print(f"{infra_type.value} 压力测试结果:")
+        for metric, value in stress_results.items():
+            if metric == 'recovery_probability':
+                print(f"{metric}: {value:.4f}")
+            else:
+                print(f"{metric}: {value:.2f}万元")
+        stress_results_all.append(stress_results)
+        npv_means.append(npv_paths.mean())
+
+        metrics = ['expected_loss', 'var_95', 'var_99', 'max_drawdown']
+        values = [stress_results[metric] for metric in metrics]
+        plt.figure(figsize=(8, 6))
+        plt.bar(metrics, values, color='orange', alpha=0.7)
+        plt.title(f'{infra_type.value} 压力测试结果', fontsize=14)
+        plt.ylabel('金额 (万元)', fontsize=12)
+        plt.xticks(rotation=45)
+        plt.grid(True, axis='y', linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, f'stress_test_{infra_type.value}.png'))
+        plt.close()
+
+# 汇总NPV路径
+if all_npv_paths and all_cash_flows and last_shibor_monthly is not None and last_yield_monthly is not None and last_oas_monthly is not None:
+    total_cash_flows = np.sum([cf for cf in all_cash_flows], axis=0)
+    total_npv_paths = np.sum(all_npv_paths, axis=0)
+    total_npv_mean = np.mean(total_npv_paths)
+    total_npv_std = np.std(total_npv_paths)
+    total_npv_5th = np.percentile(total_npv_paths, 5)
+    total_npv_95th = np.percentile(total_npv_paths, 95)
+    print(f"\n总未来10年NPV均值: {total_npv_mean:.2f} 万元, 标准差: {total_npv_std:.2f} 万元")
+    print(f"总NPV 5%-95% 分位数: [{total_npv_5th:.2f}, {total_npv_95th:.2f}] 万元")
+
+    # 保留调试信息，检查是否仍包含 nan
+    print(f"total_cash_flows contains nan: {np.any(np.isnan(total_cash_flows))}")
+    print(f"last_shibor_monthly contains nan: {np.any(np.isnan(last_shibor_monthly))}")
+    print(f"last_yield_monthly contains nan: {np.any(np.isnan(last_yield_monthly))}")
+    print(f"last_oas_monthly contains nan: {np.any(np.isnan(last_oas_monthly))}")
+
+    # 为 nan 值添加插值处理（向前填充，延用上一个值）
+    if np.any(np.isnan(last_shibor_monthly)):
+        # 将数组转换为 pandas DataFrame，沿时间轴（axis=1）进行向前填充
+        shibor_df = pd.DataFrame(last_shibor_monthly)
+        shibor_df = shibor_df.ffill(axis=1).bfill(axis=1) # 首值用后向填充
+        last_shibor_monthly = shibor_df.to_numpy()
+        print(f"last_shibor_monthly 插值后仍包含 nan: {np.any(np.isnan(last_shibor_monthly))}")
+
+    if np.any(np.isnan(last_yield_monthly)):
+        yield_df = pd.DataFrame(last_yield_monthly)
+        yield_df = yield_df.ffill(axis=1).bfill(axis=1)
+        last_yield_monthly = yield_df.to_numpy()
+        print(f"last_yield_monthly 插值后仍包含 nan: {np.any(np.isnan(last_yield_monthly))}")
+
+    if np.any(np.isnan(last_oas_monthly)):
+        oas_df = pd.DataFrame(last_oas_monthly)
+        oas_df = oas_df.ffill(axis=1).bfill(axis=1)
+        last_oas_monthly = oas_df.to_numpy()
+        print(f"last_oas_monthly 插值后仍包含 nan: {np.any(np.isnan(last_oas_monthly))}")
+
+    # 确保插值后无 nan，否则抛出错误
+    if np.any(np.isnan(total_cash_flows)):
+        raise ValueError("total_cash_flows 中包含 nan，请检查 simulate_cash_flows 函数")
+    if np.any(np.isnan(last_shibor_monthly)):
+        raise ValueError("last_shibor_monthly 插值后仍包含 nan，请检查 cir_model 或数据加载")
+    if np.any(np.isnan(last_yield_monthly)):
+        raise ValueError("last_yield_monthly 插值后仍包含 nan，请检查 hull_white_model 或数据加载")
+    if np.any(np.isnan(last_oas_monthly)):
+        raise ValueError("last_oas_monthly 插值后仍包含 nan，请检查 oas_model 或数据加载")
+
+    simulations = total_cash_flows.shape[0]
+    T = FORECAST_MONTHS
+    dt_month = 1 / 12
+    pv_paths = np.zeros(simulations)
+
+    for n in range(simulations):
+        discount_factor = 1.0
+        pv = 0.0
+        for t in range(T):
+            r_t_n = last_shibor_monthly[n, t] if t < 12 else last_yield_monthly[n, t]
+            oas_t = last_oas_monthly[n, t]
+            discount_rate = r_t_n + oas_t
+            discount_rate = max(discount_rate, 0.0001)
+            discount_factor *= (1 + discount_rate) ** dt_month
+            if discount_factor == 0:
+                discount_factor = 1e-10
+            pv += total_cash_flows[n, t] / discount_factor
+        pv_paths[n] = pv
+
+    total_pv = np.mean(pv_paths)
+    total_pv_std = np.std(pv_paths)
+    total_pv_5th = np.percentile(pv_paths, 5)
+    total_pv_95th = np.percentile(pv_paths, 95)
+    print(f"\n基于OAS的总资产证券化定价 (万元): {total_pv:.2f}")
+    print(f"标准差: {total_pv_std:.2f} 万元")
+    print(f"5%-95% 分位数: [{total_pv_5th:.2f}, {total_pv_95th:.2f}] 万元")
+
+    total_funding_scale = total_pv_95th * 0.9
+    print(f"总筹资规模 (万元): {total_funding_scale:.2f}")
+
+    tranche_ratios = [0.7, 0.2, 0.1]
+    tranche_npv = [total_pv * ratio for ratio in tranche_ratios]
+    tranche_credit_enhancement = [0.25, 0.10, 0.00]
+    tranche_spreads = [51.02, 153.05, 255.08]
+    tranche_yields = [0.0246, 0.0345, 0.0463]
+    tranche_issue_prices = [100 / (1 + yield_) ** 10 for yield_ in tranche_yields]
+    tranche_names = ['Senior层级', 'Mezzanine层级', 'Junior层级']
+
+    print("\n总分层结构定价结果 (基于OAS):")
+    for name, ratio, npv, ce, spread, yield_, price_ in zip(tranche_names, tranche_ratios, tranche_npv, tranche_credit_enhancement, tranche_spreads, tranche_yields, tranche_issue_prices):
+        scale = npv
+        print(f"{name}:")
+        print(f"规模: {scale:.2f}万元")
+        print(f"信用增级: {ce * 100:.2f}%")
+        print(f"利差: {spread:.2f}bp")
+        print(f"收益率: {yield_ * 100:.2f}%")
+        print(f"发行价格: {price_:.2f}元/百元面值\n")
+
+    plt.figure(figsize=(10, 6))
+    plt.bar(tranche_names, tranche_npv, color=['blue', 'orange', 'green'], alpha=0.7)
+    plt.title('资产池分层定价结构 (基于OAS)', fontsize=14)
+    plt.xlabel('层级', fontsize=12)
+    plt.ylabel('规模 (万元)', fontsize=12)
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, 'tranche_pricing_oas.png'))
+    plt.close()
+
+    if stability_metrics_all:
+        avg_stability = np.average([m['average_stability'] for m in stability_metrics_all], weights=npv_means)
+        revenue_growth = np.average([m['revenue_growth'] for m in stability_metrics_all], weights=npv_means)
+        volatility = np.average([m['volatility'] for m in stability_metrics_all], weights=npv_means)
+        stability_std = np.mean([m['stability_std'] for m in stability_metrics_all])
+        print("\n总体收入稳定性评估汇总 (加权平均):")
+        print(f"平均稳定性: {avg_stability:.4f}")
+        print(f"稳定性标准差: {stability_std:.4f}")
+        print(f"收入增长率: {revenue_growth:.4f}")
+        print(f"年化波动率: {volatility:.4f}")
+
+        infra_names = [infra_type.value for infra_type in infrastructure_types]
+        stabilities = [m['average_stability'] for m in stability_metrics_all]
+        growths = [m['revenue_growth'] for m in stability_metrics_all]
+
+        plt.figure(figsize=(12, 6))
+        plt.plot(infra_names, stabilities, marker='o', label='平均稳定性', color='blue')
+        plt.plot(infra_names, growths, marker='s', label='收入增长率', color='green')
+        plt.title('各基础设施收入稳定性对比', fontsize=14)
+        plt.xlabel('基础设施类型', fontsize=12)
+        plt.ylabel('指标值', fontsize=12)
+        plt.legend(loc='best', fontsize=10)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, 'stability_comparison.png'))
+        plt.close()
+
+    if risk_assessments_all:
+        overall_risk_scores = [r['overall_risk_score'] for r in risk_assessments_all]
+        detailed_scores = {k: [] for k in risk_assessments_all[0]['detailed_scores'].keys()}
+        for r in risk_assessments_all:
+            for k, v in r['detailed_scores'].items():
+                detailed_scores[k].append(v)
+        overall_risk_score = np.average(overall_risk_scores, weights=npv_means)
+        detailed_avg = {k: np.average(v, weights=npv_means) for k, v in detailed_scores.items()}
+        risk_level = '高' if overall_risk_score > 0.7 else '中' if overall_risk_score > 0.4 else '低'
+        print("\n总体风险评估汇总 (加权平均):")
+        print(f"综合风险评分: {overall_risk_score:.4f}")
+        print(f"风险等级: {risk_level}")
+        for k, v in detailed_avg.items():
+            print(f"{k}: {v:.4f}")
+
+        plt.figure(figsize=(12, 6))
+        plt.bar(infra_names, overall_risk_scores, color='red', alpha=0.7)
+        plt.title('各基础设施综合风险评分对比', fontsize=14)
+        plt.xlabel('基础设施类型', fontsize=12)
+        plt.ylabel('综合风险评分', fontsize=12)
+        plt.grid(True, axis='y', linestyle='--', alpha=0.7)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, 'risk_comparison.png'))
+        plt.close()
+
+    if stress_results_all:
+        expected_loss = np.average([r['expected_loss'] for r in stress_results_all], weights=npv_means)
+        var_95 = np.average([r['var_95'] for r in stress_results_all], weights=npv_means)
+        var_99 = np.average([r['var_99'] for r in stress_results_all], weights=npv_means)
+        max_drawdown = np.average([r['max_drawdown'] for r in stress_results_all], weights=npv_means)
+        recovery_probability = np.mean([r['recovery_probability'] for r in stress_results_all])
+        print("\n总体压力测试汇总 (加权平均):")
+        print(f"预期损失: {expected_loss:.2f}万元")
+        print(f"95% VaR: {var_95:.2f}万元")
+        print(f"99% VaR: {var_99:.2f}万元")
+        print(f"最大回撤: {max_drawdown:.2f}万元")
+        print(f"恢复概率: {recovery_probability:.4f}")
+
+        expected_losses = [r['expected_loss'] for r in stress_results_all]
+        max_drawdowns = [r['max_drawdown'] for r in stress_results_all]
+
+        plt.figure(figsize=(12, 6))
+        x = np.arange(len(infra_names))
+        plt.bar(x - 0.2, expected_losses, 0.4, label='预期损失', color='orange')
+        plt.bar(x + 0.2, max_drawdowns, 0.4, label='最大回撤', color='purple')
+        plt.title('各基础设施压力测试结果对比', fontsize=14)
+        plt.xlabel('基础设施类型', fontsize=12)
+        plt.ylabel('金额 (万元)', fontsize=12)
+        plt.xticks(x, infra_names, rotation=45)
+        plt.legend(loc='best', fontsize=10)
+        plt.grid(True, axis='y', linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, 'stress_test_comparison.png'))
+        plt.close()
+else:
+    print("未成功生成任何NPV路径，无法进行汇总和分层定价.")
+
+    # 汇总收入稳定性评估
+    if stability_metrics_all:
+        avg_stability = np.average([m['average_stability'] for m in stability_metrics_all], weights=npv_means)
+        revenue_growth = np.average([m['revenue_growth'] for m in stability_metrics_all], weights=npv_means)
+        volatility = np.average([m['volatility'] for m in stability_metrics_all], weights=npv_means)
+        stability_std = np.mean([m['stability_std'] for m in stability_metrics_all])
+        print("\n总体收入稳定性评估汇总 (加权平均):")
+        print(f"平均稳定性: {avg_stability:.4f}")
+        print(f"稳定性标准差: {stability_std:.4f}")
+        print(f"收入增长率: {revenue_growth:.4f}")
+        print(f"年化波动率: {volatility:.4f}")
+
+        # 收入稳定性对比图
+        infra_names = [infra_type.value for infra_type in infrastructure_types]
+        stabilities = [m['average_stability'] for m in stability_metrics_all]
+        growths = [m['revenue_growth'] for m in stability_metrics_all]
+
+        plt.figure(figsize=(12, 6))
+        plt.plot(infra_names, stabilities, marker='o', label='平均稳定性', color='blue')
+        plt.plot(infra_names, growths, marker='s', label='收入增长率', color='green')
+        plt.title('各基础设施收入稳定性对比', fontsize=14)
+        plt.xlabel('基础设施类型', fontsize=12)
+        plt.ylabel('指标值', fontsize=12)
+        plt.legend(loc='best', fontsize=10)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, 'stability_comparison.png'))
+        plt.close()
+
+    # 汇总风险评估
+    if risk_assessments_all:
+        overall_risk_scores = [r['overall_risk_score'] for r in risk_assessments_all]
+        detailed_scores = {k: [] for k in risk_assessments_all[0]['detailed_scores'].keys()}
+        for r in risk_assessments_all:
+            for k, v in r['detailed_scores'].items():
+                detailed_scores[k].append(v)
+        overall_risk_score = np.average(overall_risk_scores, weights=npv_means)
+        detailed_avg = {k: np.average(v, weights=npv_means) for k, v in detailed_scores.items()}
+        risk_level = '高' if overall_risk_score > 0.7 else '中' if overall_risk_score > 0.4 else '低'
+        print("\n总体风险评估汇总 (加权平均):")
+        print(f"综合风险评分: {overall_risk_score:.4f}")
+        print(f"风险等级: {risk_level}")
+        for k, v in detailed_avg.items():
+            print(f"{k}: {v:.4f}")
+
+        # 风险评估对比图
+        plt.figure(figsize=(12, 6))
+        plt.bar(infra_names, overall_risk_scores, color='red', alpha=0.7)
+        plt.title('各基础设施综合风险评分对比', fontsize=14)
+        plt.xlabel('基础设施类型', fontsize=12)
+        plt.ylabel('综合风险评分', fontsize=12)
+        plt.grid(True, axis='y', linestyle='--', alpha=0.7)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, 'risk_comparison.png'))
+        plt.close()
+
+    # 汇总压力测试
+    if stress_results_all:
+        expected_loss = np.average([r['expected_loss'] for r in stress_results_all], weights=npv_means)
+        var_95 = np.average([r['var_95'] for r in stress_results_all], weights=npv_means)
+        var_99 = np.average([r['var_99'] for r in stress_results_all], weights=npv_means)
+        max_drawdown = np.average([r['max_drawdown'] for r in stress_results_all], weights=npv_means)
+        recovery_probability = np.mean([r['recovery_probability'] for r in stress_results_all])
+        print("\n总体压力测试汇总 (加权平均):")
+        print(f"预期损失: {expected_loss:.2f}万元")
+        print(f"95% VaR: {var_95:.2f}万元")
+        print(f"99% VaR: {var_99:.2f}万元")
+        print(f"最大回撤: {max_drawdown:.2f}万元")
+        print(f"恢复概率: {recovery_probability:.4f}")
+
+        # 压力测试对比图
+        expected_losses = [r['expected_loss'] for r in stress_results_all]
+        max_drawdowns = [r['max_drawdown'] for r in stress_results_all]
+
+        plt.figure(figsize=(12, 6))
+        x = np.arange(len(infra_names))
+        plt.bar(x - 0.2, expected_losses, 0.4, label='预期损失', color='orange')
+        plt.bar(x + 0.2, max_drawdowns, 0.4, label='最大回撤', color='purple')
+        plt.title('各基础设施压力测试结果对比', fontsize=14)
+        plt.xlabel('基础设施类型', fontsize=12)
+        plt.ylabel('金额 (万元)', fontsize=12)
+        plt.xticks(x, infra_names, rotation=45)
+        plt.legend(loc='best', fontsize=10)
+        plt.grid(True, axis='y', linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, 'stress_test_comparison.png'))
+        plt.close()
+    else:
+        print("未成功生成任何NPV路径，无法进行汇总和分层定价.")
+
+
+# 在 comprehensive_analysis 函数中添加热力图
+import seaborn as sns
+
+def comprehensive_analysis(rf_forecast, cir_forecast, hw_forecast, oas_forecast, cash_flow_forecasts):
+    print("\n运行综合分析：经济指标与资产证券化结果...")
+    print(f"rf_forecast: {rf_forecast is not None}, shape: {rf_forecast.shape if rf_forecast is not None else None}")
+    print(f"cir_forecast: {cir_forecast is not None}, shape: {cir_forecast.shape if cir_forecast is not None else None}")
+    print(f"hw_forecast: {hw_forecast is not None}, shape: {hw_forecast.shape if hw_forecast is not None else None}")
+    print(f"oas_forecast: {oas_forecast is not None}, shape: {oas_forecast.shape if oas_forecast is not None else None}")
+
+    # 确保所有数据使用月度频率
+    if rf_forecast is not None:
+        rf_forecast['时间'] = pd.to_datetime(rf_forecast['时间'])
+    if cir_forecast is not None:
+        cir_forecast['时间'] = pd.to_datetime(cir_forecast['时间'])
+    if hw_forecast is not None:
+        hw_forecast['时间'] = pd.to_datetime(hw_forecast['时间'])
+    if oas_forecast is not None:
+        oas_forecast['时间'] = pd.to_datetime(oas_forecast['时间'])
+
+    # 创建时间索引
+    future_dates = pd.date_range(start='2025-01-01', end='2034-12-01', freq='MS')
+    combined_data = pd.DataFrame({'时间': future_dates})
+
+    # 合并数据
+    if rf_forecast is not None:
+        combined_data = combined_data.merge(rf_forecast[['时间', '预测失业率', 'GDP']].rename(columns={'预测失业率': '失业率'}),
+                                          on='时间', how='left')
+        print("Merged with rf_forecast, columns:", combined_data.columns)
+    if cir_forecast is not None:
+        combined_data = combined_data.merge(cir_forecast[['时间', 'SHIBOR_1M']], on='时间', how='left')
+        print("Merged with cir_forecast, columns:", combined_data.columns)
+    if hw_forecast is not None:
+        combined_data = combined_data.merge(hw_forecast[['时间', '10年国债收益率']], on='时间', how='left')
+        print("Merged with hw_forecast, columns:", combined_data.columns)
+    if oas_forecast is not None:
+        combined_data = combined_data.merge(oas_forecast[['时间', '预测OAS']], on='时间', how='left')
+        print("Merged with oas_forecast, columns:", combined_data.columns)
+
+    print(f"combined_data shape: {combined_data.shape}")
+    print(f"combined_data columns: {combined_data.columns}")
+    print("combined_data preview:")
+    print(combined_data.head())
+
+    # 检查 NaN 情况
+    print("combined_data NaN 统计:")
+    print(combined_data.isnull().sum())
+
+    # 确保至少有 2 行有效数据
+    if combined_data.shape[0] < 2 or combined_data.drop('时间', axis=1).isnull().all().all():
+        print("combined_data 为空或数据不足（少于 2 行），无法计算相关性矩阵")
+        combined_data.to_excel(os.path.join(OUTPUT_DIR, 'combined_economic_indicators.xlsx'), index=False)
+        return
+
+    # 计算相关性矩阵
+    correlation_matrix = combined_data.drop('时间', axis=1).corr()
+    print("\n相关性矩阵:")
+    print(correlation_matrix)
+
+    # 可视化
+    plt.figure(figsize=(12, 10))  # 增大图表大小
+    sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1, fmt='.2f', annot_kws={"size": 10})
+    plt.title('经济指标与资产证券化结果相关性矩阵', fontsize=16, pad=20)
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, 'correlation_matrix.png'))
+    plt.close()
+
+    # 保存结果
+    combined_data.to_excel(os.path.join(OUTPUT_DIR, 'combined_economic_indicators.xlsx'), index=False)
+    print(f"综合分析结果已保存至 {os.path.join(OUTPUT_DIR, 'combined_economic_indicators.xlsx')}")
+
+print("\n开始运行综合分析...")
+if all([rf_forecast is not None, cir_forecast is not None, hw_forecast is not None, oas_forecast is not None]):
+    comprehensive_analysis(rf_forecast, cir_forecast, hw_forecast, oas_forecast, cash_flow_forecasts)
+else:
+    print("部分预测数据为空，无法运行综合分析。检查以下变量：")
+    print(f"rf_forecast: {rf_forecast is not None}")
+    print(f"cir_forecast: {cir_forecast is not None}")
+    print(f"hw_forecast: {hw_forecast is not None}")
+    print(f"oas_forecast: {oas_forecast is not None}")
+
+print("\n所有模型运行完成！")
+
