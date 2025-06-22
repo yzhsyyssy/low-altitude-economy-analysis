@@ -13,13 +13,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
 import warnings
 
-# 导入各部分代码
-from low_altitude_economy_part1 import *
-from low_altitude_economy_part2 import *
-from low_altitude_economy_part3 import *
-from low_altitude_economy_part4 import *
-from low_altitude_economy_part5 import *
-
 # 设置警告过滤
 warnings.filterwarnings('ignore')
 
